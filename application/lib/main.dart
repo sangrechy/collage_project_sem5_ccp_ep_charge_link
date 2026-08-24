@@ -1,5 +1,9 @@
 import 'package:flutter/material.dart';
 
+import 'config/service_factory.dart';
+import 'repositories/charge_link_repository.dart';
+import 'services/phone/phone_battery_service.dart';
+
 void main() {
   runApp(const ChargeLinkApp());
 }
@@ -14,10 +18,23 @@ class ChargeLinkApp extends StatefulWidget {
 class _ChargeLinkAppState extends State<ChargeLinkApp> {
   ThemeMode _themeMode = ThemeMode.dark;
 
+  late final ChargeLinkRepository _repository;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _repository = ChargeLinkRepository(
+      esp32Service: ServiceFactory.createEsp32Service(),
+      phoneBatteryService: _UnavailablePhoneBatteryService(),
+    );
+  }
+
   void _toggleTheme() {
     setState(() {
-      _themeMode =
-      _themeMode == ThemeMode.dark ? ThemeMode.light : ThemeMode.dark;
+      _themeMode = _themeMode == ThemeMode.dark
+          ? ThemeMode.light
+          : ThemeMode.dark;
     });
   }
 
@@ -30,6 +47,7 @@ class _ChargeLinkAppState extends State<ChargeLinkApp> {
       theme: _buildLightTheme(),
       darkTheme: _buildDarkTheme(),
       home: DashboardScreen(
+        repository: _repository,
         onToggleTheme: _toggleTheme,
         isDarkMode: _themeMode == ThemeMode.dark,
       ),
@@ -64,16 +82,49 @@ class _ChargeLinkAppState extends State<ChargeLinkApp> {
 }
 
 // ============================================================
+// TEMPORARY PHONE SERVICE
+// ============================================================
+
+class _UnavailablePhoneBatteryService
+    implements PhoneBatteryService {
+  @override
+  Future<int?> getBatteryPercentage() async => null;
+
+  @override
+  Future<bool?> getChargingState() async => null;
+
+  @override
+  Future<double?> getBatteryVoltage() async => null;
+
+  @override
+  Future<double?> getBatteryCurrent() async => null;
+
+  @override
+  Future<double?> getBatteryTemperature() async => null;
+
+  @override
+  Future<double?> getBatteryHealth() async => null;
+
+  @override
+  Future<String?> getBatteryModel() async => null;
+
+  @override
+  Future<String?> getManufacturer() async => null;
+}
+
+// ============================================================
 // DASHBOARD
 // ============================================================
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({
     super.key,
+    required this.repository,
     required this.onToggleTheme,
     required this.isDarkMode,
   });
 
+  final ChargeLinkRepository repository;
   final VoidCallback onToggleTheme;
   final bool isDarkMode;
 
@@ -82,18 +133,90 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
-  // Temporary UI state.
-  // Later these values will come from ChargeLinkRepository / ESP32.
-  bool _esp32Connected = true;
-  bool _charging = true;
+  bool _esp32Connected = false;
+  bool _charging = false;
+
+  double _voltage = 0.0;
+  double _current = 0.0;
+  double _power = 0.0;
+  double _energyWh = 0.0;
 
   static const Color connectedColor = Color(0xFF4CAF72);
   static const Color disconnectedColor = Color(0xFFD95C5C);
 
-  void _toggleConnectionForTesting() {
-    setState(() {
-      _esp32Connected = !_esp32Connected;
+  @override
+  void initState() {
+    super.initState();
+
+    _listenToConnection();
+    _connectToEsp32();
+  }
+
+  void _listenToConnection() {
+    widget.repository.connectionState.listen((connected) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _esp32Connected = connected;
+
+        if (!connected) {
+          _charging = false;
+          _voltage = 0.0;
+          _current = 0.0;
+          _power = 0.0;
+        }
+      });
     });
+  }
+
+  Future<void> _connectToEsp32() async {
+    try {
+      await widget.repository.connect();
+
+      if (!mounted) {
+        return;
+      }
+
+      await _refreshData();
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _esp32Connected = false;
+      });
+    }
+  }
+
+  Future<void> _refreshData() async {
+    if (!_esp32Connected) {
+      return;
+    }
+
+    try {
+      final powerData =
+      await widget.repository.getPowerData();
+
+      final charging =
+      await widget.repository.getChargingState();
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _charging = charging;
+        _voltage = powerData.voltage;
+        _current = powerData.current;
+        _power = powerData.power;
+        _energyWh = powerData.energyWh;
+      });
+    } catch (_) {
+      // Ignore temporary service errors.
+    }
   }
 
   Future<void> _toggleCharging() async {
@@ -101,26 +224,52 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return;
     }
 
-    // Future:
-    //
-    // if (_charging) {
-    //   await repository.stopCharging();
-    // } else {
-    //   await repository.startCharging();
-    // }
-    //
-    // The ESP32 will ultimately return the actual state.
+    try {
+      if (_charging) {
+        await widget.repository.stopCharging();
+      } else {
+        await widget.repository.startCharging();
+      }
 
-    setState(() {
-      _charging = !_charging;
-    });
+      await _refreshData();
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {});
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Charging command failed: $e',
+          ),
+        ),
+      );
+    }
+  }
+
+  Future<void> _toggleConnectionForTesting() async {
+    try {
+      if (_esp32Connected) {
+        await widget.repository.disconnect();
+      } else {
+        await _connectToEsp32();
+      }
+    } catch (_) {}
   }
 
   @override
   Widget build(BuildContext context) {
     final colors = _DashboardColors.of(context);
-    final statusColor =
-    _esp32Connected ? connectedColor : disconnectedColor;
+
+    final statusColor = _esp32Connected
+        ? connectedColor
+        : disconnectedColor;
 
     return Scaffold(
       appBar: AppBar(
@@ -181,19 +330,31 @@ class _DashboardScreenState extends State<DashboardScreen> {
       body: SafeArea(
         top: false,
         child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(22, 8, 22, 28),
+          padding: const EdgeInsets.fromLTRB(
+            22,
+            8,
+            22,
+            28,
+          ),
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+            crossAxisAlignment:
+            CrossAxisAlignment.stretch,
             children: [
               _ChargingCard(
                 charging: _charging,
+                voltage: _voltage,
+                current: _current,
+                power: _power,
               ),
               const SizedBox(height: 16),
-              const _BatteryCard(),
+              _BatteryCard(
+                energyWh: _energyWh,
+              ),
               const SizedBox(height: 16),
               _ActionButton(
                 label: 'CHANGE SPEED',
-                onPressed: () => _showChangeSpeedSheet(context),
+                onPressed: () =>
+                    _showChangeSpeedSheet(context),
                 colors: colors,
               ),
               const SizedBox(height: 10),
@@ -202,7 +363,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 onPressed: () {
                   Navigator.of(context).push(
                     MaterialPageRoute(
-                      builder: (_) => const AnalysisScreen(),
+                      builder: (_) =>
+                      const AnalysisScreen(),
                     ),
                   );
                 },
@@ -210,7 +372,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
               const SizedBox(height: 10),
               _ActionButton(
-                label: _charging ? 'STOP CHARGING' : 'START CHARGING',
+                label: _charging
+                    ? 'STOP CHARGING'
+                    : 'START CHARGING',
                 filled: _charging,
                 enabled: _esp32Connected,
                 onPressed: _toggleCharging,
@@ -244,7 +408,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
           child: SizedBox(
             height: 220,
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(24, 4, 24, 24),
+              padding: const EdgeInsets.fromLTRB(
+                24,
+                4,
+                24,
+                24,
+              ),
               child: Text(
                 'Change Speed',
                 style: TextStyle(
@@ -289,11 +458,19 @@ class AnalysisScreen extends StatelessWidget {
       ),
       body: SafeArea(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(22, 8, 22, 28),
+          padding: const EdgeInsets.fromLTRB(
+            22,
+            8,
+            22,
+            28,
+          ),
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+            crossAxisAlignment:
+            CrossAxisAlignment.stretch,
             children: [
-              _AnalysisMetricsCard(colors: colors),
+              _AnalysisMetricsCard(
+                colors: colors,
+              ),
               const SizedBox(height: 26),
               _SectionTitle(
                 title: 'POWER',
@@ -348,8 +525,11 @@ class AnalysisScreen extends StatelessWidget {
                 padding: const EdgeInsets.all(18),
                 decoration: BoxDecoration(
                   color: colors.card,
-                  border: Border.all(color: colors.border),
-                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(
+                    color: colors.border,
+                  ),
+                  borderRadius:
+                  BorderRadius.circular(16),
                 ),
                 child: Row(
                   children: [
@@ -385,19 +565,32 @@ class AnalysisScreen extends StatelessWidget {
 class _ChargingCard extends StatelessWidget {
   const _ChargingCard({
     required this.charging,
+    required this.voltage,
+    required this.current,
+    required this.power,
   });
 
   final bool charging;
+  final double voltage;
+  final double current;
+  final double power;
 
   @override
   Widget build(BuildContext context) {
     final colors = _DashboardColors.of(context);
 
     return Container(
-      padding: const EdgeInsets.fromLTRB(22, 22, 22, 20),
+      padding: const EdgeInsets.fromLTRB(
+        22,
+        22,
+        22,
+        20,
+      ),
       decoration: BoxDecoration(
         color: colors.card,
-        border: Border.all(color: colors.border),
+        border: Border.all(
+          color: colors.border,
+        ),
         borderRadius: BorderRadius.circular(18),
       ),
       child: Column(
@@ -405,9 +598,13 @@ class _ChargingCard extends StatelessWidget {
           Align(
             alignment: Alignment.centerLeft,
             child: Text(
-              charging ? 'CHARGING' : 'NOT CHARGING',
+              charging
+                  ? 'CHARGING'
+                  : 'NOT CHARGING',
               style: TextStyle(
-                color: charging ? colors.accent : colors.secondaryText,
+                color: charging
+                    ? colors.accent
+                    : colors.secondaryText,
                 fontSize: 14,
                 fontWeight: FontWeight.w700,
                 letterSpacing: 0.5,
@@ -416,7 +613,7 @@ class _ChargingCard extends StatelessWidget {
           ),
           const SizedBox(height: 22),
           Text(
-            charging ? '6.2 W' : '0.0 W',
+            '${power.toStringAsFixed(1)} W',
             style: TextStyle(
               color: colors.primaryText,
               fontSize: 48,
@@ -429,14 +626,18 @@ class _ChargingCard extends StatelessWidget {
             children: [
               Expanded(
                 child: _Measurement(
-                  value: charging ? '5.02 V' : '—',
+                  value: charging
+                      ? '${voltage.toStringAsFixed(2)} V'
+                      : '—',
                   label: 'Voltage',
                   colors: colors,
                 ),
               ),
               Expanded(
                 child: _Measurement(
-                  value: charging ? '1.24 A' : '—',
+                  value: charging
+                      ? '${current.toStringAsFixed(2)} A'
+                      : '—',
                   label: 'Current',
                   colors: colors,
                 ),
@@ -490,7 +691,11 @@ class _Measurement extends StatelessWidget {
 // ============================================================
 
 class _BatteryCard extends StatelessWidget {
-  const _BatteryCard();
+  const _BatteryCard({
+    required this.energyWh,
+  });
+
+  final double energyWh;
 
   @override
   Widget build(BuildContext context) {
@@ -503,7 +708,9 @@ class _BatteryCard extends StatelessWidget {
       ),
       decoration: BoxDecoration(
         color: colors.card,
-        border: Border.all(color: colors.border),
+        border: Border.all(
+          color: colors.border,
+        ),
         borderRadius: BorderRadius.circular(18),
       ),
       child: Row(
@@ -517,8 +724,9 @@ class _BatteryCard extends StatelessWidget {
           ),
           Expanded(
             child: _InfoValue(
-              label: 'Charging Limit',
-              value: '80%',
+              label: 'Energy',
+              value:
+              '${energyWh.toStringAsFixed(2)} Wh',
               colors: colors,
             ),
           ),
@@ -542,7 +750,8 @@ class _InfoValue extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment:
+      CrossAxisAlignment.start,
       children: [
         Text(
           label,
@@ -590,14 +799,21 @@ class _ActionButton extends StatelessWidget {
       height: 54,
       child: filled
           ? FilledButton(
-        onPressed: enabled ? onPressed : null,
+        onPressed:
+        enabled ? onPressed : null,
         style: FilledButton.styleFrom(
-          backgroundColor: colors.primaryText,
-          foregroundColor: colors.background,
-          disabledBackgroundColor: colors.disabled,
-          disabledForegroundColor: colors.secondaryText,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
+          backgroundColor:
+          colors.primaryText,
+          foregroundColor:
+          colors.background,
+          disabledBackgroundColor:
+          colors.disabled,
+          disabledForegroundColor:
+          colors.secondaryText,
+          shape:
+          RoundedRectangleBorder(
+            borderRadius:
+            BorderRadius.circular(14),
           ),
         ),
         child: Text(
@@ -610,13 +826,20 @@ class _ActionButton extends StatelessWidget {
         ),
       )
           : OutlinedButton(
-        onPressed: enabled ? onPressed : null,
+        onPressed:
+        enabled ? onPressed : null,
         style: OutlinedButton.styleFrom(
-          foregroundColor: colors.primaryText,
-          disabledForegroundColor: colors.secondaryText,
-          side: BorderSide(color: colors.border),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
+          foregroundColor:
+          colors.primaryText,
+          disabledForegroundColor:
+          colors.secondaryText,
+          side: BorderSide(
+            color: colors.border,
+          ),
+          shape:
+          RoundedRectangleBorder(
+            borderRadius:
+            BorderRadius.circular(14),
           ),
         ),
         child: Text(
@@ -652,10 +875,17 @@ class _DeviceCard extends StatelessWidget {
         : const Color(0xFFD95C5C);
 
     return Container(
-      padding: const EdgeInsets.fromLTRB(22, 18, 22, 18),
+      padding: const EdgeInsets.fromLTRB(
+        22,
+        18,
+        22,
+        18,
+      ),
       decoration: BoxDecoration(
         color: colors.card,
-        border: Border.all(color: colors.border),
+        border: Border.all(
+          color: colors.border,
+        ),
         borderRadius: BorderRadius.circular(18),
       ),
       child: Row(
@@ -663,7 +893,8 @@ class _DeviceCard extends StatelessWidget {
           _StatusDot(color: statusColor),
           const SizedBox(width: 12),
           Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+            crossAxisAlignment:
+            CrossAxisAlignment.start,
             children: [
               Text(
                 'Device',
@@ -715,7 +946,8 @@ class _StatusDot extends StatelessWidget {
 // ANALYSIS COMPONENTS
 // ============================================================
 
-class _AnalysisMetricsCard extends StatelessWidget {
+class _AnalysisMetricsCard
+    extends StatelessWidget {
   const _AnalysisMetricsCard({
     required this.colors,
   });
@@ -728,8 +960,11 @@ class _AnalysisMetricsCard extends StatelessWidget {
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         color: colors.card,
-        border: Border.all(color: colors.border),
-        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color: colors.border,
+        ),
+        borderRadius:
+        BorderRadius.circular(18),
       ),
       child: Column(
         children: [
@@ -786,7 +1021,8 @@ class _AnalysisMetricsCard extends StatelessWidget {
   }
 }
 
-class _AnalysisRow extends StatelessWidget {
+class _AnalysisRow
+    extends StatelessWidget {
   const _AnalysisRow({
     required this.label,
     required this.value,
@@ -800,9 +1036,11 @@ class _AnalysisRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 7),
+      padding:
+      const EdgeInsets.symmetric(vertical: 7),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        mainAxisAlignment:
+        MainAxisAlignment.spaceBetween,
         children: [
           Text(
             label,
@@ -841,7 +1079,8 @@ class _Divider extends StatelessWidget {
   }
 }
 
-class _SectionTitle extends StatelessWidget {
+class _SectionTitle
+    extends StatelessWidget {
   const _SectionTitle({
     required this.title,
     required this.colors,
@@ -864,7 +1103,8 @@ class _SectionTitle extends StatelessWidget {
   }
 }
 
-class _GraphPlaceholder extends StatelessWidget {
+class _GraphPlaceholder
+    extends StatelessWidget {
   const _GraphPlaceholder({
     required this.title,
     required this.colors,
@@ -879,12 +1119,16 @@ class _GraphPlaceholder extends StatelessWidget {
       height: 190,
       decoration: BoxDecoration(
         color: colors.card,
-        border: Border.all(color: colors.border),
-        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color: colors.border,
+        ),
+        borderRadius:
+        BorderRadius.circular(18),
       ),
       child: Center(
         child: Column(
-          mainAxisSize: MainAxisSize.min,
+          mainAxisSize:
+          MainAxisSize.min,
           children: [
             Icon(
               Icons.show_chart_rounded,
@@ -905,7 +1149,8 @@ class _GraphPlaceholder extends StatelessWidget {
             Text(
               'Graph data will appear here',
               style: TextStyle(
-                color: colors.secondaryText.withValues(alpha: 0.7),
+                color: colors.secondaryText
+                    .withValues(alpha: 0.7),
                 fontSize: 12,
               ),
             ),
@@ -916,7 +1161,8 @@ class _GraphPlaceholder extends StatelessWidget {
   }
 }
 
-class _LegendDot extends StatelessWidget {
+class _LegendDot
+    extends StatelessWidget {
   const _LegendDot({
     required this.color,
     required this.label,
@@ -976,8 +1222,11 @@ class _DashboardColors {
   final Color accent;
   final Color disabled;
 
-  static _DashboardColors of(BuildContext context) {
-    final brightness = Theme.of(context).brightness;
+  static _DashboardColors of(
+      BuildContext context,
+      ) {
+    final brightness =
+        Theme.of(context).brightness;
 
     if (brightness == Brightness.dark) {
       return const _DashboardColors(
