@@ -1,3 +1,4 @@
+import '../models/app_snapshot.dart';
 import '../models/charging_sample.dart';
 import '../models/device_status.dart';
 import '../models/energy_data.dart';
@@ -15,9 +16,9 @@ class ChargeLinkRepository {
   final Esp32Service esp32Service;
   final PhoneBatteryService phoneBatteryService;
 
-  // ------------------------------------------------------------
-  // ESP32
-  // ------------------------------------------------------------
+  // ============================================================
+  // ESP32 CONNECTION
+  // ============================================================
 
   Stream<bool> get connectionState {
     return esp32Service.connectionState;
@@ -31,24 +32,28 @@ class ChargeLinkRepository {
     return esp32Service.disconnect();
   }
 
+  // ============================================================
+  // ESP32 DEVICE
+  // ============================================================
+
   Future<DeviceStatus> getDeviceStatus() {
     return esp32Service.getDeviceStatus();
   }
+
+  // ============================================================
+  // POWER
+  // ============================================================
 
   Future<PowerData> getPowerData() {
     return esp32Service.getPowerData();
   }
 
+  // ============================================================
+  // CHARGING
+  // ============================================================
+
   Future<bool> getChargingState() {
     return esp32Service.getChargingState();
-  }
-
-  Future<int> getChargingLimit() {
-    return esp32Service.getChargingLimit();
-  }
-
-  Future<void> setChargingLimit(int percentage) {
-    return esp32Service.setChargingLimit(percentage);
   }
 
   Future<void> startCharging() {
@@ -58,6 +63,28 @@ class ChargeLinkRepository {
   Future<void> stopCharging() {
     return esp32Service.stopCharging();
   }
+
+  // ============================================================
+  // CHARGING LIMIT
+  // ============================================================
+
+  Future<int> getChargingLimit() {
+    return esp32Service.getChargingLimit();
+  }
+
+  Future<void> setChargingLimit(int percentage) {
+    if (percentage < 0 || percentage > 100) {
+      throw ArgumentError(
+        'Charging limit must be between 0 and 100.',
+      );
+    }
+
+    return esp32Service.setChargingLimit(percentage);
+  }
+
+  // ============================================================
+  // CHARGING DATA
+  // ============================================================
 
   Future<ChargingSample> getChargingSample() {
     return esp32Service.getChargingSample();
@@ -71,9 +98,9 @@ class ChargeLinkRepository {
     return esp32Service.getEnergyData();
   }
 
-  // ------------------------------------------------------------
-  // PHONE
-  // ------------------------------------------------------------
+  // ============================================================
+  // PHONE BATTERY
+  // ============================================================
 
   Future<int?> getPhoneBatteryPercentage() {
     return phoneBatteryService.getBatteryPercentage();
@@ -105,5 +132,48 @@ class ChargeLinkRepository {
 
   Future<String?> getPhoneManufacturer() {
     return phoneBatteryService.getManufacturer();
+  }
+
+  // ============================================================
+  // COMPLETE APPLICATION SNAPSHOT
+  // ============================================================
+
+  Future<AppSnapshot> getAppSnapshot() async {
+    final deviceStatus = await getDeviceStatus();
+    final powerData = await getPowerData();
+    final charging = await getChargingState();
+    final chargingLimit = await getChargingLimit();
+    final energyData = await getEnergyData();
+    final temperatureData = await getTemperature();
+    final chargingSample = await getChargingSample();
+
+    final phoneBatteryPercentage =
+    await getPhoneBatteryPercentage();
+
+    final phoneCharging =
+    await getPhoneChargingState();
+
+    final phoneBatteryTemperature =
+    await getPhoneBatteryTemperature();
+
+    final phoneBatteryHealth =
+    await getPhoneBatteryHealth();
+
+    return AppSnapshot(
+      deviceStatus: deviceStatus,
+      powerData: powerData,
+      charging: charging,
+      chargingLimit: chargingLimit,
+      energyData: energyData,
+      temperatureData: temperatureData,
+      chargingSample: chargingSample,
+      phoneBatteryPercentage:
+      phoneBatteryPercentage,
+      phoneCharging: phoneCharging,
+      phoneBatteryTemperature:
+      phoneBatteryTemperature,
+      phoneBatteryHealth:
+      phoneBatteryHealth,
+    );
   }
 }

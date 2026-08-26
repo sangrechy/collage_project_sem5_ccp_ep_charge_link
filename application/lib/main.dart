@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
 
-import 'config/service_factory.dart';
-import 'repositories/charge_link_repository.dart';
-import 'services/phone/phone_battery_service.dart';
+import 'controllers/charge_link_controller.dart';
 
 void main() {
   runApp(const ChargeLinkApp());
@@ -18,21 +16,26 @@ class ChargeLinkApp extends StatefulWidget {
 class _ChargeLinkAppState extends State<ChargeLinkApp> {
   ThemeMode _themeMode = ThemeMode.dark;
 
-  late final ChargeLinkRepository _repository;
+  late final ChargeLinkController _controller;
 
   @override
   void initState() {
     super.initState();
 
-    _repository = ChargeLinkRepository(
-      esp32Service: ServiceFactory.createEsp32Service(),
-      phoneBatteryService: _UnavailablePhoneBatteryService(),
-    );
+    _controller = ChargeLinkController();
+    _controller.initialize();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
   }
 
   void _toggleTheme() {
     setState(() {
-      _themeMode = _themeMode == ThemeMode.dark
+      _themeMode =
+      _themeMode == ThemeMode.dark
           ? ThemeMode.light
           : ThemeMode.dark;
     });
@@ -47,7 +50,7 @@ class _ChargeLinkAppState extends State<ChargeLinkApp> {
       theme: _buildLightTheme(),
       darkTheme: _buildDarkTheme(),
       home: DashboardScreen(
-        repository: _repository,
+        controller: _controller,
         onToggleTheme: _toggleTheme,
         isDarkMode: _themeMode == ThemeMode.dark,
       ),
@@ -82,317 +85,164 @@ class _ChargeLinkAppState extends State<ChargeLinkApp> {
 }
 
 // ============================================================
-// TEMPORARY PHONE SERVICE
-// ============================================================
-
-class _UnavailablePhoneBatteryService
-    implements PhoneBatteryService {
-  @override
-  Future<int?> getBatteryPercentage() async => null;
-
-  @override
-  Future<bool?> getChargingState() async => null;
-
-  @override
-  Future<double?> getBatteryVoltage() async => null;
-
-  @override
-  Future<double?> getBatteryCurrent() async => null;
-
-  @override
-  Future<double?> getBatteryTemperature() async => null;
-
-  @override
-  Future<double?> getBatteryHealth() async => null;
-
-  @override
-  Future<String?> getBatteryModel() async => null;
-
-  @override
-  Future<String?> getManufacturer() async => null;
-}
-
-// ============================================================
 // DASHBOARD
 // ============================================================
 
-class DashboardScreen extends StatefulWidget {
+class DashboardScreen extends StatelessWidget {
   const DashboardScreen({
     super.key,
-    required this.repository,
+    required this.controller,
     required this.onToggleTheme,
     required this.isDarkMode,
   });
 
-  final ChargeLinkRepository repository;
+  final ChargeLinkController controller;
   final VoidCallback onToggleTheme;
   final bool isDarkMode;
-
-  @override
-  State<DashboardScreen> createState() => _DashboardScreenState();
-}
-
-class _DashboardScreenState extends State<DashboardScreen> {
-  bool _esp32Connected = false;
-  bool _charging = false;
-
-  double _voltage = 0.0;
-  double _current = 0.0;
-  double _power = 0.0;
-  double _energyWh = 0.0;
-
-  static const Color connectedColor = Color(0xFF4CAF72);
-  static const Color disconnectedColor = Color(0xFFD95C5C);
-
-  @override
-  void initState() {
-    super.initState();
-
-    _listenToConnection();
-    _connectToEsp32();
-  }
-
-  void _listenToConnection() {
-    widget.repository.connectionState.listen((connected) {
-      if (!mounted) {
-        return;
-      }
-
-      setState(() {
-        _esp32Connected = connected;
-
-        if (!connected) {
-          _charging = false;
-          _voltage = 0.0;
-          _current = 0.0;
-          _power = 0.0;
-        }
-      });
-    });
-  }
-
-  Future<void> _connectToEsp32() async {
-    try {
-      await widget.repository.connect();
-
-      if (!mounted) {
-        return;
-      }
-
-      await _refreshData();
-    } catch (e) {
-      if (!mounted) {
-        return;
-      }
-
-      setState(() {
-        _esp32Connected = false;
-      });
-    }
-  }
-
-  Future<void> _refreshData() async {
-    if (!_esp32Connected) {
-      return;
-    }
-
-    try {
-      final powerData =
-      await widget.repository.getPowerData();
-
-      final charging =
-      await widget.repository.getChargingState();
-
-      if (!mounted) {
-        return;
-      }
-
-      setState(() {
-        _charging = charging;
-        _voltage = powerData.voltage;
-        _current = powerData.current;
-        _power = powerData.power;
-        _energyWh = powerData.energyWh;
-      });
-    } catch (_) {
-      // Ignore temporary service errors.
-    }
-  }
-
-  Future<void> _toggleCharging() async {
-    if (!_esp32Connected) {
-      return;
-    }
-
-    try {
-      if (_charging) {
-        await widget.repository.stopCharging();
-      } else {
-        await widget.repository.startCharging();
-      }
-
-      await _refreshData();
-
-      if (!mounted) {
-        return;
-      }
-
-      setState(() {});
-    } catch (e) {
-      if (!mounted) {
-        return;
-      }
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Charging command failed: $e',
-          ),
-        ),
-      );
-    }
-  }
-
-  Future<void> _toggleConnectionForTesting() async {
-    try {
-      if (_esp32Connected) {
-        await widget.repository.disconnect();
-      } else {
-        await _connectToEsp32();
-      }
-    } catch (_) {}
-  }
 
   @override
   Widget build(BuildContext context) {
     final colors = _DashboardColors.of(context);
 
-    final statusColor = _esp32Connected
-        ? connectedColor
-        : disconnectedColor;
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) {
+        final connected = controller.connected;
+        final charging = controller.charging;
 
-    return Scaffold(
-      appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        surfaceTintColor: Colors.transparent,
-        elevation: 0,
-        automaticallyImplyLeading: false,
-        titleSpacing: 22,
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'CHARGE LINK',
-              style: TextStyle(
-                color: colors.primaryText,
-                fontSize: 22,
-                fontWeight: FontWeight.w700,
-                letterSpacing: -0.4,
+        final statusColor = connected
+            ? const Color(0xFF4CAF72)
+            : const Color(0xFFD95C5C);
+
+        return Scaffold(
+          appBar: AppBar(
+            backgroundColor: Colors.transparent,
+            surfaceTintColor: Colors.transparent,
+            elevation: 0,
+            automaticallyImplyLeading: false,
+            titleSpacing: 22,
+            title: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'CHARGE LINK',
+                  style: TextStyle(
+                    color: colors.primaryText,
+                    fontSize: 22,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: -0.4,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'Smart Charge Box',
+                  style: TextStyle(
+                    color: colors.secondaryText,
+                    fontSize: 14,
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              IconButton(
+                tooltip: isDarkMode
+                    ? 'Switch to light theme'
+                    : 'Switch to dark theme',
+                onPressed: onToggleTheme,
+                icon: Icon(
+                  isDarkMode
+                      ? Icons.light_mode_outlined
+                      : Icons.dark_mode_outlined,
+                  color: colors.secondaryText,
+                ),
               ),
-            ),
-            const SizedBox(height: 2),
-            Text(
-              'Smart Charge Box',
-              style: TextStyle(
-                color: colors.secondaryText,
-                fontSize: 14,
+              const SizedBox(width: 4),
+              Padding(
+                padding: const EdgeInsets.only(right: 22),
+                child: Center(
+                  child: _StatusDot(
+                    color: statusColor,
+                  ),
+                ),
               ),
-            ),
-          ],
-        ),
-        actions: [
-          IconButton(
-            tooltip: widget.isDarkMode
-                ? 'Switch to light theme'
-                : 'Switch to dark theme',
-            onPressed: widget.onToggleTheme,
-            icon: Icon(
-              widget.isDarkMode
-                  ? Icons.light_mode_outlined
-                  : Icons.dark_mode_outlined,
-              color: colors.secondaryText,
-            ),
+            ],
           ),
-          const SizedBox(width: 4),
-          GestureDetector(
-            onLongPress: _toggleConnectionForTesting,
-            child: Padding(
-              padding: const EdgeInsets.only(right: 22),
-              child: Center(
-                child: _StatusDot(
-                  color: statusColor,
+          body: SafeArea(
+            top: false,
+            child: RefreshIndicator(
+              onRefresh: controller.refresh,
+              child: SingleChildScrollView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                padding: const EdgeInsets.fromLTRB(
+                  22,
+                  8,
+                  22,
+                  28,
+                ),
+                child: Column(
+                  crossAxisAlignment:
+                  CrossAxisAlignment.stretch,
+                  children: [
+                    _ChargingCard(
+                      controller: controller,
+                    ),
+                    const SizedBox(height: 16),
+                    _BatteryCard(
+                      controller: controller,
+                    ),
+                    const SizedBox(height: 16),
+                    _ActionButton(
+                      label: 'CHANGE SPEED',
+                      onPressed: () =>
+                          _showChangeSpeedSheet(context),
+                      colors: colors,
+                    ),
+                    const SizedBox(height: 10),
+                    _ActionButton(
+                      label: 'ANALYSIS',
+                      onPressed: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) =>
+                                AnalysisScreen(
+                                  controller: controller,
+                                ),
+                          ),
+                        );
+                      },
+                      colors: colors,
+                    ),
+                    const SizedBox(height: 10),
+                    _ActionButton(
+                      label: charging
+                          ? 'STOP CHARGING'
+                          : 'START CHARGING',
+                      filled: charging,
+                      enabled: connected &&
+                          !controller.loading,
+                      onPressed: charging
+                          ? controller.stopCharging
+                          : controller.startCharging,
+                      colors: colors,
+                    ),
+                    const SizedBox(height: 26),
+                    _DeviceCard(
+                      controller: controller,
+                    ),
+                  ],
                 ),
               ),
             ),
           ),
-        ],
-      ),
-      body: SafeArea(
-        top: false,
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(
-            22,
-            8,
-            22,
-            28,
-          ),
-          child: Column(
-            crossAxisAlignment:
-            CrossAxisAlignment.stretch,
-            children: [
-              _ChargingCard(
-                charging: _charging,
-                voltage: _voltage,
-                current: _current,
-                power: _power,
-              ),
-              const SizedBox(height: 16),
-              _BatteryCard(
-                energyWh: _energyWh,
-              ),
-              const SizedBox(height: 16),
-              _ActionButton(
-                label: 'CHANGE SPEED',
-                onPressed: () =>
-                    _showChangeSpeedSheet(context),
-                colors: colors,
-              ),
-              const SizedBox(height: 10),
-              _ActionButton(
-                label: 'ANALYSIS',
-                onPressed: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) =>
-                      const AnalysisScreen(),
-                    ),
-                  );
-                },
-                colors: colors,
-              ),
-              const SizedBox(height: 10),
-              _ActionButton(
-                label: _charging
-                    ? 'STOP CHARGING'
-                    : 'START CHARGING',
-                filled: _charging,
-                enabled: _esp32Connected,
-                onPressed: _toggleCharging,
-                colors: colors,
-              ),
-              const SizedBox(height: 26),
-              _DeviceCard(
-                connected: _esp32Connected,
-              ),
-            ],
-          ),
-        ),
-      ),
+        );
+      },
     );
   }
 
   void _showChangeSpeedSheet(BuildContext context) {
     final colors = _DashboardColors.of(context);
+
+    int selectedLimit = controller.chargingLimit;
 
     showModalBottomSheet<void>(
       context: context,
@@ -404,26 +254,83 @@ class _DashboardScreenState extends State<DashboardScreen> {
         ),
       ),
       builder: (context) {
-        return SafeArea(
-          child: SizedBox(
-            height: 220,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(
-                24,
-                4,
-                24,
-                24,
-              ),
-              child: Text(
-                'Change Speed',
-                style: TextStyle(
-                  color: colors.primaryText,
-                  fontSize: 21,
-                  fontWeight: FontWeight.w700,
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  24,
+                  4,
+                  24,
+                  24,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment:
+                  CrossAxisAlignment.stretch,
+                  children: [
+                    Text(
+                      'Charging Limit',
+                      style: TextStyle(
+                        color: colors.primaryText,
+                        fontSize: 21,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+                    Text(
+                      '$selectedLimit%',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: colors.primaryText,
+                        fontSize: 32,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    Slider(
+                      value: selectedLimit.toDouble(),
+                      min: 0,
+                      max: 100,
+                      divisions: 20,
+                      onChanged: (value) {
+                        setSheetState(() {
+                          selectedLimit =
+                              value.round();
+                        });
+                      },
+                    ),
+                    const SizedBox(height: 10),
+                    SizedBox(
+                      height: 50,
+                      child: FilledButton(
+                        onPressed: controller.connected
+                            ? () async {
+                          await controller
+                              .setChargingLimit(
+                            selectedLimit,
+                          );
+
+                          if (context.mounted) {
+                            Navigator.of(
+                              context,
+                            ).pop();
+                          }
+                        }
+                            : null,
+                        child: const Text(
+                          'APPLY LIMIT',
+                          style: TextStyle(
+                            fontWeight:
+                            FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
-            ),
-          ),
+            );
+          },
         );
       },
     );
@@ -435,125 +342,131 @@ class _DashboardScreenState extends State<DashboardScreen> {
 // ============================================================
 
 class AnalysisScreen extends StatelessWidget {
-  const AnalysisScreen({super.key});
+  const AnalysisScreen({
+    super.key,
+    required this.controller,
+  });
+
+  final ChargeLinkController controller;
 
   @override
   Widget build(BuildContext context) {
     final colors = _DashboardColors.of(context);
 
-    return Scaffold(
-      backgroundColor: colors.background,
-      appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        surfaceTintColor: Colors.transparent,
-        elevation: 0,
-        title: Text(
-          'CHARGE ANALYSIS',
-          style: TextStyle(
-            color: colors.primaryText,
-            fontSize: 20,
-            fontWeight: FontWeight.w700,
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) {
+        return Scaffold(
+          backgroundColor: colors.background,
+          appBar: AppBar(
+            backgroundColor: Colors.transparent,
+            surfaceTintColor: Colors.transparent,
+            elevation: 0,
+            title: Text(
+              'CHARGE ANALYSIS',
+              style: TextStyle(
+                color: colors.primaryText,
+                fontSize: 20,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
           ),
-        ),
-      ),
-      body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(
-            22,
-            8,
-            22,
-            28,
-          ),
-          child: Column(
-            crossAxisAlignment:
-            CrossAxisAlignment.stretch,
-            children: [
-              _AnalysisMetricsCard(
-                colors: colors,
+          body: SafeArea(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(
+                22,
+                8,
+                22,
+                28,
               ),
-              const SizedBox(height: 26),
-              _SectionTitle(
-                title: 'POWER',
-                colors: colors,
-              ),
-              const SizedBox(height: 10),
-              _GraphPlaceholder(
-                title: 'POWER GRAPH',
-                colors: colors,
-              ),
-              const SizedBox(height: 10),
-              Row(
+              child: Column(
+                crossAxisAlignment:
+                CrossAxisAlignment.stretch,
                 children: [
+                  _AnalysisMetricsCard(
+                    controller: controller,
+                    colors: colors,
+                  ),
+                  const SizedBox(height: 26),
+                  _SectionTitle(
+                    title: 'POWER',
+                    colors: colors,
+                  ),
+                  const SizedBox(height: 10),
+                  _GraphPlaceholder(
+                    title: 'POWER GRAPH',
+                    colors: colors,
+                  ),
+                  const SizedBox(height: 10),
                   _LegendDot(
                     color: colors.accent,
                     label: 'Charger Power',
                     colors: colors,
                   ),
-                  const SizedBox(width: 20),
-                  _LegendDot(
-                    color: colors.secondaryText,
-                    label: 'Battery-side Power',
+                  const SizedBox(height: 28),
+                  _SectionTitle(
+                    title: 'TEMPERATURE',
                     colors: colors,
+                  ),
+                  const SizedBox(height: 10),
+                  _GraphPlaceholder(
+                    title: 'TEMPERATURE GRAPH',
+                    colors: colors,
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    'Temperature vs Time',
+                    style: TextStyle(
+                      color: colors.secondaryText,
+                      fontSize: 13,
+                    ),
+                  ),
+                  const SizedBox(height: 28),
+                  _SectionTitle(
+                    title: 'CHARGING BEHAVIOR',
+                    colors: colors,
+                  ),
+                  const SizedBox(height: 10),
+                  Container(
+                    padding: const EdgeInsets.all(18),
+                    decoration: BoxDecoration(
+                      color: colors.card,
+                      border: Border.all(
+                        color: colors.border,
+                      ),
+                      borderRadius:
+                      BorderRadius.circular(16),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          controller.charging
+                              ? Icons.bolt_rounded
+                              : Icons.check_circle_outline_rounded,
+                          size: 22,
+                          color: colors.accent,
+                        ),
+                        const SizedBox(width: 12),
+                        Text(
+                          controller.charging
+                              ? 'Charging'
+                              : 'Not Charging',
+                          style: TextStyle(
+                            color: colors.primaryText,
+                            fontSize: 16,
+                            fontWeight:
+                            FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ],
               ),
-              const SizedBox(height: 28),
-              _SectionTitle(
-                title: 'TEMPERATURE',
-                colors: colors,
-              ),
-              const SizedBox(height: 10),
-              _GraphPlaceholder(
-                title: 'TEMPERATURE GRAPH',
-                colors: colors,
-              ),
-              const SizedBox(height: 10),
-              Text(
-                'Temperature vs Time',
-                style: TextStyle(
-                  color: colors.secondaryText,
-                  fontSize: 13,
-                ),
-              ),
-              const SizedBox(height: 28),
-              _SectionTitle(
-                title: 'CHARGING BEHAVIOR',
-                colors: colors,
-              ),
-              const SizedBox(height: 10),
-              Container(
-                padding: const EdgeInsets.all(18),
-                decoration: BoxDecoration(
-                  color: colors.card,
-                  border: Border.all(
-                    color: colors.border,
-                  ),
-                  borderRadius:
-                  BorderRadius.circular(16),
-                ),
-                child: Row(
-                  children: [
-                    Icon(
-                      Icons.check_circle_outline_rounded,
-                      size: 22,
-                      color: colors.accent,
-                    ),
-                    const SizedBox(width: 12),
-                    Text(
-                      'Normal',
-                      style: TextStyle(
-                        color: colors.primaryText,
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 }
@@ -564,20 +477,45 @@ class AnalysisScreen extends StatelessWidget {
 
 class _ChargingCard extends StatelessWidget {
   const _ChargingCard({
-    required this.charging,
-    required this.voltage,
-    required this.current,
-    required this.power,
+    required this.controller,
   });
 
-  final bool charging;
-  final double voltage;
-  final double current;
-  final double power;
+  final ChargeLinkController controller;
+
+  String _formatPower() {
+    final value = controller.power;
+
+    if (value == null) {
+      return '—';
+    }
+
+    return '${value.toStringAsFixed(2)} W';
+  }
+
+  String _formatVoltage() {
+    final value = controller.voltage;
+
+    if (value == null) {
+      return '—';
+    }
+
+    return '${value.toStringAsFixed(2)} V';
+  }
+
+  String _formatCurrent() {
+    final value = controller.current;
+
+    if (value == null) {
+      return '—';
+    }
+
+    return '${value.toStringAsFixed(2)} A';
+  }
 
   @override
   Widget build(BuildContext context) {
     final colors = _DashboardColors.of(context);
+    final charging = controller.charging;
 
     return Container(
       padding: const EdgeInsets.fromLTRB(
@@ -613,7 +551,7 @@ class _ChargingCard extends StatelessWidget {
           ),
           const SizedBox(height: 22),
           Text(
-            '${power.toStringAsFixed(1)} W',
+            _formatPower(),
             style: TextStyle(
               color: colors.primaryText,
               fontSize: 48,
@@ -626,18 +564,14 @@ class _ChargingCard extends StatelessWidget {
             children: [
               Expanded(
                 child: _Measurement(
-                  value: charging
-                      ? '${voltage.toStringAsFixed(2)} V'
-                      : '—',
+                  value: _formatVoltage(),
                   label: 'Voltage',
                   colors: colors,
                 ),
               ),
               Expanded(
                 child: _Measurement(
-                  value: charging
-                      ? '${current.toStringAsFixed(2)} A'
-                      : '—',
+                  value: _formatCurrent(),
                   label: 'Current',
                   colors: colors,
                 ),
@@ -692,14 +626,17 @@ class _Measurement extends StatelessWidget {
 
 class _BatteryCard extends StatelessWidget {
   const _BatteryCard({
-    required this.energyWh,
+    required this.controller,
   });
 
-  final double energyWh;
+  final ChargeLinkController controller;
 
   @override
   Widget build(BuildContext context) {
     final colors = _DashboardColors.of(context);
+
+    final battery =
+        controller.batteryPercentage;
 
     return Container(
       padding: const EdgeInsets.symmetric(
@@ -718,15 +655,17 @@ class _BatteryCard extends StatelessWidget {
           Expanded(
             child: _InfoValue(
               label: 'Battery',
-              value: '62%',
+              value: battery == null
+                  ? '—'
+                  : '$battery%',
               colors: colors,
             ),
           ),
           Expanded(
             child: _InfoValue(
-              label: 'Energy',
+              label: 'Charging Limit',
               value:
-              '${energyWh.toStringAsFixed(2)} Wh',
+              '${controller.chargingLimit}%',
               colors: colors,
             ),
           ),
@@ -861,18 +800,24 @@ class _ActionButton extends StatelessWidget {
 
 class _DeviceCard extends StatelessWidget {
   const _DeviceCard({
-    required this.connected,
+    required this.controller,
   });
 
-  final bool connected;
+  final ChargeLinkController controller;
 
   @override
   Widget build(BuildContext context) {
     final colors = _DashboardColors.of(context);
 
+    final connected =
+        controller.connected;
+
     final statusColor = connected
         ? const Color(0xFF4CAF72)
         : const Color(0xFFD95C5C);
+
+    final deviceName =
+        controller.snapshot?.deviceStatus.deviceName;
 
     return Container(
       padding: const EdgeInsets.fromLTRB(
@@ -890,31 +835,37 @@ class _DeviceCard extends StatelessWidget {
       ),
       child: Row(
         children: [
-          _StatusDot(color: statusColor),
+          _StatusDot(
+            color: statusColor,
+          ),
           const SizedBox(width: 12),
-          Column(
-            crossAxisAlignment:
-            CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Device',
-                style: TextStyle(
-                  color: colors.secondaryText,
-                  fontSize: 13,
+          Expanded(
+            child: Column(
+              crossAxisAlignment:
+              CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Device',
+                  style: TextStyle(
+                    color: colors.secondaryText,
+                    fontSize: 13,
+                  ),
                 ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                connected
-                    ? 'Smart Charge Box Connected'
-                    : 'Smart Charge Box Disconnected',
-                style: TextStyle(
-                  color: colors.primaryText,
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600,
+                const SizedBox(height: 4),
+                Text(
+                  connected
+                      ? (deviceName ??
+                      'Smart Charge Box Connected')
+                      : 'Smart Charge Box Disconnected',
+                  style: TextStyle(
+                    color: colors.primaryText,
+                    fontSize: 15,
+                    fontWeight:
+                    FontWeight.w600,
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ],
       ),
@@ -949,10 +900,32 @@ class _StatusDot extends StatelessWidget {
 class _AnalysisMetricsCard
     extends StatelessWidget {
   const _AnalysisMetricsCard({
+    required this.controller,
     required this.colors,
   });
 
+  final ChargeLinkController controller;
   final _DashboardColors colors;
+
+  String _energy(double value) {
+    return '${value.toStringAsFixed(2)} Wh';
+  }
+
+  String _power(double? value) {
+    if (value == null) {
+      return '—';
+    }
+
+    return '${value.toStringAsFixed(2)} W';
+  }
+
+  String _temperature(double? value) {
+    if (value == null) {
+      return '—';
+    }
+
+    return '${value.toStringAsFixed(1)} °C';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -963,56 +936,48 @@ class _AnalysisMetricsCard
         border: Border.all(
           color: colors.border,
         ),
-        borderRadius:
-        BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(18),
       ),
       child: Column(
         children: [
           _AnalysisRow(
-            label: 'Session',
-            value: '1h 12m',
+            label: 'Session Energy',
+            value: _energy(
+              controller.sessionEnergyWh,
+            ),
             colors: colors,
           ),
           _Divider(colors: colors),
           _AnalysisRow(
-            label: 'Energy Supplied',
-            value: '42.6 Wh',
+            label: 'Total Energy',
+            value: _energy(
+              controller.totalEnergyWh,
+            ),
             colors: colors,
           ),
           _Divider(colors: colors),
           _AnalysisRow(
-            label: 'Energy Stored',
-            value: '36.8 Wh',
+            label: 'Current Power',
+            value: _power(
+              controller.power,
+            ),
             colors: colors,
           ),
           _Divider(colors: colors),
           _AnalysisRow(
-            label: 'Efficiency',
-            value: '86.4%',
-            colors: colors,
-          ),
-          _Divider(colors: colors),
-          _AnalysisRow(
-            label: 'Peak Power',
-            value: '28.4 W',
-            colors: colors,
-          ),
-          _Divider(colors: colors),
-          _AnalysisRow(
-            label: 'Average Power',
-            value: '21.7 W',
-            colors: colors,
-          ),
-          _Divider(colors: colors),
-          _AnalysisRow(
-            label: 'Peak Temperature',
-            value: 'Unavailable',
+            label: 'Temperature',
+            value: _temperature(
+              controller.temperature,
+            ),
             colors: colors,
           ),
           _Divider(colors: colors),
           _AnalysisRow(
             label: 'Battery Health',
-            value: '94%',
+            value:
+            controller.batteryHealth == null
+                ? 'Unavailable'
+                : '${controller.batteryHealth!.toStringAsFixed(0)}%',
             colors: colors,
           ),
         ],
@@ -1037,7 +1002,9 @@ class _AnalysisRow
   Widget build(BuildContext context) {
     return Padding(
       padding:
-      const EdgeInsets.symmetric(vertical: 7),
+      const EdgeInsets.symmetric(
+        vertical: 7,
+      ),
       child: Row(
         mainAxisAlignment:
         MainAxisAlignment.spaceBetween,
@@ -1133,15 +1100,18 @@ class _GraphPlaceholder
             Icon(
               Icons.show_chart_rounded,
               size: 30,
-              color: colors.secondaryText,
+              color:
+              colors.secondaryText,
             ),
             const SizedBox(height: 8),
             Text(
               title,
               style: TextStyle(
-                color: colors.secondaryText,
+                color:
+                colors.secondaryText,
                 fontSize: 13,
-                fontWeight: FontWeight.w600,
+                fontWeight:
+                FontWeight.w600,
                 letterSpacing: 0.5,
               ),
             ),
@@ -1176,7 +1146,8 @@ class _LegendDot
   @override
   Widget build(BuildContext context) {
     return Row(
-      mainAxisSize: MainAxisSize.min,
+      mainAxisSize:
+      MainAxisSize.min,
       children: [
         Container(
           width: 8,
@@ -1228,26 +1199,39 @@ class _DashboardColors {
     final brightness =
         Theme.of(context).brightness;
 
-    if (brightness == Brightness.dark) {
+    if (brightness ==
+        Brightness.dark) {
       return const _DashboardColors(
-        background: Color(0xFF111315),
+        background:
+        Color(0xFF111315),
         card: Color(0xFF191C1F),
         border: Color(0xFF2A2F33),
-        primaryText: Color(0xFFF1F3F4),
-        secondaryText: Color(0xFF9AA1A8),
-        accent: Color(0xFF4F8CFF),
-        disabled: Color(0xFF24282C),
+        primaryText:
+        Color(0xFFF1F3F4),
+        secondaryText:
+        Color(0xFF9AA1A8),
+        accent:
+        Color(0xFF4F8CFF),
+        disabled:
+        Color(0xFF24282C),
       );
     }
 
     return const _DashboardColors(
-      background: Color(0xFFF3F4F5),
-      card: Color(0xFFFFFFFF),
-      border: Color(0xFFDDE1E5),
-      primaryText: Color(0xFF202428),
-      secondaryText: Color(0xFF6B727A),
-      accent: Color(0xFF2563EB),
-      disabled: Color(0xFFE4E7EA),
+      background:
+      Color(0xFFF3F4F5),
+      card:
+      Color(0xFFFFFFFF),
+      border:
+      Color(0xFFDDE1E5),
+      primaryText:
+      Color(0xFF202428),
+      secondaryText:
+      Color(0xFF6B727A),
+      accent:
+      Color(0xFF2563EB),
+      disabled:
+      Color(0xFFE4E7EA),
     );
   }
 }
