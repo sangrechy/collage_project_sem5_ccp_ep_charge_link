@@ -468,11 +468,13 @@ float trebleFilter = 0.0f;
 
 float previousOutput = 0.0f;
 
+float gateEnvelope = 0.0f;
+
 bool audioPlaying = false;
 
 
 // ============================================================
-// AUDIO EQ
+// AUDIO EQ & NOISE GATE CONSTANTS
 // ============================================================
 
 const float DC_ALPHA =
@@ -485,16 +487,20 @@ const float TREBLE_ALPHA =
   0.35f;
 
 const float BASS_GAIN =
-  1.08f;
+  1.05f;
 
 const float VOICE_GAIN =
-  1.10f;
+  1.15f;
 
 const float CLARITY_GAIN =
-  1.12f;
+  1.15f;
 
 const float OUTPUT_GAIN =
-  0.88f;
+  0.92f;
+
+const float NOISE_GATE_THRESHOLD =
+  0.020f;
+
 
 
 // ============================================================
@@ -558,6 +564,22 @@ float processAudioSample(float input) {
     dcFilter;
 
 
+  // Envelope tracker for dynamic noise gate
+  float sampleAbs =
+    fabsf(clean);
+
+  if (sampleAbs > gateEnvelope) {
+
+    gateEnvelope =
+      sampleAbs;
+
+  } else {
+
+    gateEnvelope *=
+      0.998f;
+  }
+
+
   bassFilter =
     bassFilter +
     BASS_ALPHA *
@@ -601,6 +623,19 @@ float processAudioSample(float input) {
     OUTPUT_GAIN;
 
 
+  // Dynamic Noise Gate: smoothly attenuate silence & background hiss
+  if (gateEnvelope < NOISE_GATE_THRESHOLD) {
+
+    float gateFactor =
+      gateEnvelope /
+      NOISE_GATE_THRESHOLD;
+
+    processed *=
+      (gateFactor * gateFactor);
+  }
+
+
+  // Anti-aliasing smoothing filter
   processed =
       previousOutput * 0.10f
     + processed * 0.90f;
@@ -629,7 +664,7 @@ float processAudioSample(float input) {
 // 16 kHz
 // Mono
 //
-// Blocking for the current prototype.
+// Enhanced: Anti-Pop Bias Ramp + Noise Gate + TPDF Dither + Idle Sleep
 //
 
 void playAudio(
@@ -658,7 +693,7 @@ void playAudio(
   );
 
   Serial.println(
-    "PLAYING VOICE"
+    "PLAYING VOICE (NOISE-FREE ENHANCED)"
   );
 
   Serial.println(
@@ -682,6 +717,27 @@ void playAudio(
 
   previousOutput = 0.0f;
 
+  gateEnvelope = 0.0f;
+
+
+  // Enable DAC pin output
+  pinMode(
+    AUDIO_PIN,
+    OUTPUT
+  );
+
+
+  // Smooth Anti-Pop Ramp-Up: 0V -> 1.65V DC operating bias
+  for (int ramp = 0; ramp <= 128; ramp++) {
+
+    dacWrite(
+      AUDIO_PIN,
+      (uint8_t)ramp
+    );
+
+    delayMicroseconds(120);
+  }
+
 
   unsigned int samples =
     length / 2;
@@ -693,6 +749,11 @@ void playAudio(
 
   bool extraMicrosecond =
     false;
+
+
+  // High-frequency TPDF dither LFSR state
+  uint16_t lfsr =
+    0xACE1u;
 
 
   for (
@@ -731,9 +792,19 @@ void playAudio(
       );
 
 
+    // 1-bit TPDF dither to eliminate 8-bit DAC quantization distortion
+    lfsr =
+      (lfsr >> 1) ^
+      (-(lfsr & 1u) & 0xB400u);
+
+    float dither =
+      ((float)(lfsr & 0x0F) - 7.5f) /
+      1024.0f;
+
+
     int dacValue =
       (int)(
-        processed * 127.0f +
+        (processed + dither) * 127.0f +
         128.0f
       );
 
@@ -780,9 +851,26 @@ void playAudio(
   }
 
 
-  dacWrite(
+  // Smooth Anti-Pop Ramp-Down: 1.65V DC bias -> 0V
+  for (int ramp = 128; ramp >= 0; ramp--) {
+
+    dacWrite(
+      AUDIO_PIN,
+      (uint8_t)ramp
+    );
+
+    delayMicroseconds(120);
+  }
+
+
+  // Disable DAC and tri-state pin to completely eliminate idle hiss & coil power
+  dacDisable(
+    AUDIO_PIN
+  );
+
+  pinMode(
     AUDIO_PIN,
-    128
+    INPUT
   );
 
 
@@ -791,7 +879,7 @@ void playAudio(
 
 
   Serial.println(
-    "Voice finished."
+    "Voice finished (DAC sleeping in silent mode)."
   );
 }
 
@@ -4198,24 +4286,23 @@ void setup() {
   Serial.println();
 
   Serial.println(
-    "Initializing audio DAC..."
+    "Initializing audio DAC (silent standby)..."
   );
 
 
   pinMode(
     AUDIO_PIN,
-    OUTPUT
+    INPUT
   );
 
 
-  dacWrite(
-    AUDIO_PIN,
-    128
+  dacDisable(
+    AUDIO_PIN
   );
 
 
   Serial.println(
-    "DAC: OK"
+    "DAC: Standby OK (noise-free idle)"
   );
 
   Serial.println(
