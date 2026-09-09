@@ -1,4 +1,4 @@
-﻿# Flutter and Dart
+# Flutter and Dart
 **/build/
 **/.dart_tool/
 **/.flutter-plugins-dependencies
@@ -16,6 +16,7 @@
 **/android/app/profile/
 **/android/app/release/
 **/*.apk
+!apks/*.apk
 **/*.aab
 **/*.jks
 **/*.keystore

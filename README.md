@@ -2,6 +2,13 @@
 
 A college engineering project delivering an intelligent charging management and telemetry system combining custom ESP32 hardware and a cross-platform Flutter mobile application.
 
+## 📱 Prebuilt Android APK
+
+You can download and install the latest standalone release build directly:
+- **[ChargeLink-v3-release.apk](apks/ChargeLink-v3-release.apk)** (v3.0.0, Release Mode, 46.5 MB)
+
+---
+
 ## ⚡ Overview
 
 ChargeLink bridges physical charging hardware with an intuitive mobile dashboard over Bluetooth Low Energy (BLE):
@@ -15,21 +22,23 @@ ChargeLink bridges physical charging hardware with an intuitive mobile dashboard
 
 `
 charge_link/
+├── apks/
+│   └── ChargeLink-v3-release.apk # Standalone pre-compiled Android release APK
 ├── application/
-│   ├── application_v3/      # Current Flutter mobile application (v3.0.0)
-│   └── application_v2/      # Previous iteration (v2.0.0)
+│   ├── application_v3/           # Current Flutter mobile application (v3.0.0)
+│   └── application_v2/           # Previous iteration (v2.0.0)
 ├── doc/
-│   ├── esp32_api.md         # ESP32 BLE protocol & GATT specification
-│   ├── 1 review.pdf         # Project review presentation
-│   ├── flow charts.pdf      # Architectural flow charts
-│   └── demo_sim.mp4         # Demonstration video
+│   ├── esp32_api.md              # ESP32 BLE protocol & GATT specification
+│   ├── 1 review.pdf              # Project review presentation
+│   ├── flow charts.pdf           # Architectural flow charts
+│   └── demo_sim.mp4              # Demonstration video
 └── firmware/
-    ├── SmartChargeBox/      # ESP32 Arduino firmware (v1.0.1)
+    ├── SmartChargeBox/           # ESP32 Arduino firmware (v1.0.1)
     │   ├── SmartChargeBox.ino
     │   ├── charging_started.h
     │   ├── charging_stopped.h
     │   └── power_limit.h
-    └── audio_tools/         # Voice alert audio assets & wav-to-header conversion
+    └── audio_tools/              # Voice alert audio assets & wav-to-header conversion
         ├── wav_to_h.py
         └── *.wav
 `
@@ -38,7 +47,12 @@ charge_link/
 
 ## 🚀 Getting Started
 
-### Flutter App (pplication_v3)
+### Install Prebuilt APK
+1. Download [ChargeLink-v3-release.apk](apks/ChargeLink-v3-release.apk) to your Android device.
+2. Open the file and allow "Install unknown apps" if prompted.
+3. Grant Nearby Devices (BLE) permissions when prompted.
+
+### Build Flutter App from Source (pplication_v3)
 
 1. **Navigate to the application folder**:
    `ash
