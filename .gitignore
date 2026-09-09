@@ -39,3 +39,7 @@
 Thumbs.db
 *.log
 *.tmp
+__pycache__/
+**/__pycache__/
+*.pyc
+**/scratch/
