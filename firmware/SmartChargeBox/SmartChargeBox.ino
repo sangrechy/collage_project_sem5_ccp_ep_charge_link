@@ -60,6 +60,14 @@
  * means the charging path is available but the phone is not
  * currently drawing enough current to be considered charging.
  *
+ * IMPORTANT (v1.0.1 fix):
+ * "charging" may ONLY be derived from measured current while
+ * "path_enabled" is true. When the path has been commanded
+ * OFF, "charging" is always forced to false and is never
+ * re-derived from current, even if residual/leaked current is
+ * still sensed. This prevents the sensor-polling loop from
+ * silently reverting a stop_charging command.
+ *
  * ============================================================
  *
  * CHARGING LIMIT
@@ -151,7 +159,7 @@
 #define DEVICE_NAME          "Charge Link"
 #define MODEL_NAME           "CL-SCB-01"
 #define HARDWARE_VERSION     "1.0"
-#define FIRMWARE_VERSION     "1.0.0"
+#define FIRMWARE_VERSION     "1.0.1"
 #define PROTOCOL_VERSION     "1.0"
 
 
@@ -791,6 +799,13 @@ void playAudio(
 // ============================================================
 // RELAY CONTROL
 // ============================================================
+//
+// This remains the ONLY place in the firmware that touches
+// RELAY_PIN directly. Every other function (BLE command
+// handlers, setup(), etc.) must go through relayChargingOn()
+// or relayChargingOff() so the physical pin state and the
+// relayPathEnabled flag can never disagree.
+//
 
 void relayChargingOn() {
 
@@ -802,6 +817,11 @@ void relayChargingOn() {
 
   relayPathEnabled =
     true;
+
+
+  Serial.println(
+    "RELAY: GPIO25 HIGH -> PATH ENABLED"
+  );
 }
 
 
@@ -815,6 +835,11 @@ void relayChargingOff() {
 
   relayPathEnabled =
     false;
+
+
+  Serial.println(
+    "RELAY: GPIO25 LOW -> PATH DISABLED"
+  );
 }
 
 
@@ -1115,6 +1140,28 @@ void readPower() {
 // ============================================================
 // CHARGING STATE
 // ============================================================
+//
+// v1.0.1 FIX
+// ------------------------------------------------------------
+// This function is READ-ONLY with respect to the commanded
+// path state (relayPathEnabled). It may only ever set
+// "charging" to true while relayPathEnabled is true.
+//
+// This is the fix for the core bug: previously, this function
+// derived "charging" purely from currentA, with no awareness
+// of whether the relay path had just been commanded OFF. That
+// meant every 1-second measurement tick could silently flip
+// "charging" back to true (and even restart a session + replay
+// the "charging started" audio) moments after stop_charging
+// had already disabled the relay and reported success.
+//
+// Now, whenever the path is disabled, charging is unconditionally
+// forced to false and the current-threshold logic is skipped
+// entirely. If current is still detected while the path is
+// disabled, that is logged as a hardware warning (possible
+// relay polarity/wiring fault) instead of being treated as
+// "still charging".
+//
 
 void updateChargingStateFromMeasurement() {
 
@@ -1128,6 +1175,54 @@ void updateChargingStateFromMeasurement() {
 
       stopChargingSession(
         false
+      );
+    }
+
+
+    return;
+  }
+
+
+  // ----------------------------------------------------------
+  // GATE: sensor readings can never re-enable "charging" while
+  // the commanded path state is OFF.
+  // ----------------------------------------------------------
+
+  if (!relayPathEnabled) {
+
+    if (charging) {
+
+      charging =
+        false;
+
+
+      stopChargingSession(
+        false
+      );
+
+
+      Serial.println(
+        "STATE: charging forced OFF (path disabled)"
+      );
+    }
+
+
+    if (
+      currentA >=
+      CHARGING_STOP_THRESHOLD_A
+    ) {
+
+      Serial.print(
+        "WARNING: current still detected with path disabled: "
+      );
+
+      Serial.print(
+        currentA,
+        3
+      );
+
+      Serial.println(
+        " A - check relay wiring / polarity"
       );
     }
 
@@ -1866,24 +1961,58 @@ void commandGetChargingState(
 // ============================================================
 // START CHARGING
 // ============================================================
+//
+// v1.0.1 FIX
+// ------------------------------------------------------------
+// Only the commanded path state (relayPathEnabled) is set
+// directly here. "charging" is left for
+// updateChargingStateFromMeasurement() to determine on the
+// next measurement tick (<=1s later), based on real current
+// draw. This keeps "charging" meaning exactly one thing
+// everywhere in the firmware: "current is actually flowing",
+// never "the user asked for it to flow".
+//
+// If a device is already drawing current the moment the path
+// is enabled, the very next measurement tick will correctly
+// flip charging=true and start a session with voice feedback -
+// so there is no meaningful behavior change for the normal
+// case, but the state can no longer be forced into an
+// inconsistent snapshot.
+//
 
 void commandStartCharging(
   int id
 ) {
 
+  Serial.println(
+    "COMMAND: start_charging"
+  );
+
+
   relayChargingOn();
+
+
+  // Take a fresh reading immediately so telemetry pushed right
+  // after this response is as up to date as possible.
+  readPower();
+
+  updateChargingStateFromMeasurement();
+
+  updateLiveCache();
 
 
   String data;
 
-
   data =
     "{\"command_accepted\":true";
 
-
   data +=
-    ",\"path_enabled\":true";
-
+    ",\"path_enabled\":" +
+    String(
+      relayPathEnabled
+        ? "true"
+        : "false"
+    );
 
   data +=
     ",\"charging\":" +
@@ -1893,60 +2022,136 @@ void commandStartCharging(
         : "false"
     );
 
-
   data +=
     "}";
-
 
   sendResponse(
     id,
     data
   );
-}
 
+  // Immediately push new live data state to Flutter
+  sendLiveData();
+}
 
 // ============================================================
 // STOP CHARGING
 // ============================================================
+//
+// v1.0.1 FIX
+// ------------------------------------------------------------
+// This is the authoritative fix for the reported bug:
+//
+//   BLE COMMAND SENT: {"command":"stop_charging"}
+//   ... followed moments later by ...
+//   "charging": true, "path_enabled": true
+//
+// Previously this handler forced charging=false directly, but
+// the very next 1-second measurement tick called
+// updateChargingStateFromMeasurement(), which re-derived
+// "charging" purely from currentA >= threshold - with no idea
+// a stop had just been requested - and flipped it straight
+// back to true (and even restarted a session + replayed the
+// "charging started" voice clip).
+//
+// Now:
+//   1. The relay is physically disabled FIRST.
+//   2. Any active session is explicitly closed out (this was
+//      previously skipped entirely, leaving sessionActive
+//      stuck true forever after a stop_charging command).
+//   3. charging/path_enabled are set to false for immediate
+//      reporting.
+//   4. Because relayPathEnabled is now false,
+//      updateChargingStateFromMeasurement() will GATE OFF any
+//      current-based re-activation on every future tick - so
+//      this false state is now guaranteed to actually stick,
+//      instead of just being a value that gets overwritten
+//      one second later.
+//
 
 void commandStopCharging(
   int id
 ) {
 
+  Serial.println(
+    "COMMAND: stop_charging"
+  );
+
+
   relayChargingOff();
+
+
+  if (sessionActive) {
+
+    stopChargingSession(
+      true
+    );
+  }
+
+
+  charging =
+    false;
+
+
+  // Verify the physical stop: take an immediate fresh reading
+  // so we can warn (via Serial) if current is still flowing
+  // through a path that should now be open.
+  readPower();
+
+  updateLiveCache();
+
+
+  if (
+    ina219Available &&
+    currentA >=
+    CHARGING_STOP_THRESHOLD_A
+  ) {
+
+    Serial.print(
+      "STOP VERIFICATION: current still "
+    );
+
+    Serial.print(
+      currentA,
+      3
+    );
+
+    Serial.println(
+      " A after relay disable - possible relay/polarity fault"
+    );
+
+  }
+
+  else {
+
+    Serial.println(
+      "STOP VERIFICATION: current at/near zero - OK"
+    );
+  }
 
 
   String data;
 
-
   data =
     "{\"command_accepted\":true";
-
 
   data +=
     ",\"path_enabled\":false";
 
-
   data +=
-    ",\"charging\":" +
-    String(
-      charging
-        ? "true"
-        : "false"
-    );
-
+    ",\"charging\":false";
 
   data +=
     "}";
-
 
   sendResponse(
     id,
     data
   );
+
+  // Immediately push new live data state to Flutter
+  sendLiveData();
 }
-
-
 // ============================================================
 // GET CHARGING LIMIT
 // ============================================================
@@ -3021,7 +3226,7 @@ void handleCommand(
 
 
   Serial.print(
-    "BLE COMMAND: "
+    "BLE COMMAND RECEIVED (RAW): "
   );
 
   Serial.println(
@@ -3039,7 +3244,7 @@ void handleCommand(
     id < 0
   ) {
 
-    return;
+    id = 0;
   }
 
 
@@ -3047,6 +3252,15 @@ void handleCommand(
     extractCommand(
       json
     );
+
+
+  Serial.print(
+    "BLE COMMAND PARSED: "
+  );
+
+  Serial.println(
+    command
+  );
 
 
   if (
@@ -3399,7 +3613,8 @@ void setupBLE() {
   commandCharacteristic =
     service->createCharacteristic(
       COMMAND_UUID,
-      BLECharacteristic::PROPERTY_WRITE
+      BLECharacteristic::PROPERTY_WRITE |
+      BLECharacteristic::PROPERTY_WRITE_NR
     );
 
 
@@ -3459,21 +3674,21 @@ void setupBLE() {
   service->start();
 
 
-  BLEAdvertising *advertising =
-    BLEDevice::getAdvertising();
+BLEAdvertising *advertising =
+  BLEDevice::getAdvertising();
 
+advertising->addServiceUUID(
+  SERVICE_UUID
+);
 
-  advertising->addServiceUUID(
-    SERVICE_UUID
-  );
+advertising->setScanResponse(true);
 
+Serial.println("Starting BLE advertising...");
 
-  advertising->setScanResponse(
-    true
-  );
+advertising->start();
 
-
-  advertising->start();
+Serial.println("BLE ADVERTISING STARTED");
+Serial.println("ESP32 should now be discoverable");
 
 
   Serial.println();
@@ -3493,6 +3708,15 @@ void setupBLE() {
   Serial.println(
     DEVICE_NAME
   );
+  Serial.print(
+    "BLE Address: "
+  );
+
+  Serial.println(
+    BLEDevice::getAddress().toString().c_str()
+  );
+
+
 
   Serial.print(
     "Service UUID: "
@@ -3832,7 +4056,7 @@ void setup() {
   );
 
   Serial.println(
-    "        ESP32 FIRMWARE v1.0.0"
+    "        ESP32 FIRMWARE v1.0.1"
   );
 
   Serial.println(
@@ -3924,6 +4148,12 @@ void setup() {
   // ========================================================
   // RELAY
   // ========================================================
+  //
+  // v1.0.1: pinMode() is set explicitly BEFORE any digitalWrite,
+  // and the path is forced to a known safe state immediately,
+  // before BLE/telemetry start, so no startup glitch can leave
+  // the pin floating or in an undefined state.
+  //
 
   Serial.println();
 
@@ -4446,7 +4676,7 @@ void loop() {
       now;
 
 
-    printSerialStatus();
+    // printSerialStatus();  // Disabled: prevents repeated large Serial Monitor status blocks
   }
 
 
@@ -4456,3 +4686,5 @@ void loop() {
 
   delay(5);
 }
+
+

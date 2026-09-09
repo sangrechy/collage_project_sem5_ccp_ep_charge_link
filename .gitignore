@@ -1,0 +1,40 @@
+﻿# Flutter and Dart
+**/build/
+**/.dart_tool/
+**/.flutter-plugins-dependencies
+**/.pub-cache/
+**/.pub/
+**/coverage/
+**/.widget_preview/
+
+# Android
+**/android/.gradle/
+**/.gradle/
+**/android/local.properties
+**/android/captures/
+**/android/app/debug/
+**/android/app/profile/
+**/android/app/release/
+**/*.apk
+**/*.aab
+**/*.jks
+**/*.keystore
+
+# iOS / macOS
+**/ios/Flutter/.last_build_id
+**/ios/Pods/
+**/ios/.symlinks/
+**/macos/Pods/
+**/macos/.symlinks/
+
+# IDE & OS
+.idea/
+**/.idea/
+*.iml
+**/*.iml
+.vscode/
+**/.vscode/
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
