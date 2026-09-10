@@ -39,26 +39,25 @@ MAPPING = [
 def enhance_audio_clean(pcm, sr=16000):
     """
     Professional Speech DSP Equalization & Cleaning for 3W Loudspeaker & ESP32 DAC:
-    1. 160 Hz Butterworth HP: Removes speaker cone bottoming & DC offset.
-    2. 5000 Hz Butterworth LP: Cuts off 8-bit quantization hiss & ultrasonic hash.
-    3. +2.0 dB Peaking EQ at 2200 Hz: Optimizes vocal formant intelligibility for small speakers.
-    4. Smooth Envelope Compressor: Broadcast vocal presence without waveform distortion.
+    1. 350 Hz 3rd-Order Butterworth HP: Eliminates ALL bass, boominess, and box vibration.
+    2. 4800 Hz 3rd-Order Butterworth LP: Cuts off high-frequency hiss & ultrasonic hash.
+    3. +1.5 dB Peaking EQ at 2400 Hz: Optimizes vocal clarity and articulation.
+    4. Smooth Envelope Compressor with gentle makeup for natural speech dynamics.
     5. Clean silence trimming & 10ms raised-cosine anti-click fade in/out.
-    6. Bounded 0.80 peak (-1.9 dBFS): Prevents amplifier input clipping and supply sag.
+    6. Reduced Sound (0.50 Peak / -6.0 dBFS): Softer, comfortable, pleasant volume.
     """
-    # 1. High-Pass Filter (160 Hz, 2nd-order Butterworth)
-    sos_hp = signal.butter(2, 160.0, btype='highpass', fs=sr, output='sos')
+    # 1. High-Pass Filter (350 Hz, 3rd-order Butterworth) - Complete bass & boominess removal
+    sos_hp = signal.butter(3, 350.0, btype='highpass', fs=sr, output='sos')
     filtered = signal.sosfilt(sos_hp, pcm)
 
-    # 2. Low-Pass Filter (5000 Hz, 3rd-order Butterworth)
-    # Human speech bandwidth is <4.5 kHz. Cutting above 5 kHz eliminates quantization hiss.
-    sos_lp = signal.butter(3, 5000.0, btype='lowpass', fs=sr, output='sos')
+    # 2. Low-Pass Filter (4800 Hz, 3rd-order Butterworth) - Eliminates hiss above vocal band
+    sos_lp = signal.butter(3, 4800.0, btype='lowpass', fs=sr, output='sos')
     filtered = signal.sosfilt(sos_lp, filtered)
 
-    # 3. Speech Presence EQ (+2.0 dB at 2200 Hz, Q=1.0)
-    w0 = 2.0 * np.pi * 2200.0 / sr
+    # 3. Speech Presence EQ (+1.5 dB at 2400 Hz, Q=1.0)
+    w0 = 2.0 * np.pi * 2400.0 / sr
     alpha = np.sin(w0) / (2.0 * 1.0)
-    A = 10.0 ** (2.0 / 40.0) # +2 dB
+    A = 10.0 ** (1.5 / 40.0) # +1.5 dB
     b_eq = [1.0 + alpha * A, -2.0 * np.cos(w0), 1.0 - alpha * A]
     a_eq = [1.0 + alpha / A, -2.0 * np.cos(w0), 1.0 - alpha / A]
     equalized = signal.lfilter(b_eq, a_eq, filtered)
@@ -80,11 +79,11 @@ def enhance_audio_clean(pcm, sr=16000):
     thresh = 0.16
     gain = np.ones_like(equalized)
     over = envelope > thresh
-    gain[over] = (thresh / envelope[over]) ** (1.0 - 1.0 / 2.5) # 2.5:1 ratio
-    compressed = equalized * gain * 1.25 # 1.25x makeup gain
+    gain[over] = (thresh / envelope[over]) ** (1.0 - 1.0 / 2.2) # Gentle 2.2:1 ratio
+    compressed = equalized * gain * 0.95 # Reduced sound volume
 
     # 5. Trim leading/trailing silence safely
-    active = np.where(np.abs(compressed) > 0.01)[0]
+    active = np.where(np.abs(compressed) > 0.008)[0]
     if len(active) > 0:
         start_idx = max(0, active[0] - int(0.025 * sr))
         end_idx = min(len(compressed), active[-1] + int(0.035 * sr))
@@ -104,11 +103,11 @@ def enhance_audio_clean(pcm, sr=16000):
         trimmed[:fade_len] *= fade_in
         trimmed[-fade_len:] *= fade_out
 
-    # 7. Safe peak normalization to 0.80 (-1.9 dBFS)
-    # Leaves 20% voltage margin so 3W amplifier (PAM8403 / 8002 / LM386) never clips
+    # 7. Reduced peak normalization to 0.50 (-6.0 dBFS)
+    # Reduces sound level to comfortable room listening with zero bass distortion
     pk = np.max(np.abs(trimmed))
     if pk > 0:
-        final = (trimmed / pk) * 0.80
+        final = (trimmed / pk) * 0.50
     else:
         final = trimmed
 
