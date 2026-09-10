@@ -1,4 +1,4 @@
-import os
+﻿import os
 import glob
 import wave
 import numpy as np
@@ -60,17 +60,15 @@ def spectral_subtraction(audio, sr=16000, frame_len=512, hop_len=128):
     mag = np.abs(spectra)
     phase = np.angle(spectra)
 
-    # Estimate noise from quietest 12% frames
     energies = np.sum(mag**2, axis=1)
-    thresh = np.percentile(energies, 12)
+    thresh = np.percentile(energies, 10)
     noise_frames = mag[energies <= thresh]
     if len(noise_frames) > 0:
         noise_profile = np.mean(noise_frames, axis=0, keepdims=True)
     else:
         noise_profile = np.min(mag, axis=0, keepdims=True)
 
-    # Denoise with 1.4x oversubtraction and 0.08 spectral floor
-    clean_mag = np.maximum(mag - 1.4 * noise_profile, 0.08 * mag)
+    clean_mag = np.maximum(mag - 1.2 * noise_profile, 0.08 * mag)
     clean_spectra = clean_mag * np.exp(1j * phase)
 
     clean_frames = np.fft.irfft(clean_spectra, axis=1) * window
@@ -91,12 +89,12 @@ def spectral_subtraction(audio, sr=16000, frame_len=512, hop_len=128):
         out_audio = out_audio[:len(audio)]
     return out_audio
 
-def enhance_audio(data, sr=16000):
+def enhance_audio_for_loudspeaker(data, sr=16000):
     # 1. Spectral Subtraction Denoising
     denoised = spectral_subtraction(data, sr=sr)
     
-    # 2. High-pass filter at 100 Hz (2nd order Butterworth)
-    fc = 100.0 / float(sr)
+    # 2. High-pass filter at 120 Hz (cuts off useless sub-frequencies that cause 3W speaker distortion)
+    fc = 120.0 / float(sr)
     w0 = 2.0 * np.pi * fc
     Q = 0.7071
     alpha = np.sin(w0) / (2.0 * Q)
@@ -104,55 +102,53 @@ def enhance_audio(data, sr=16000):
     a_hp = [1.0 + alpha, -2.0 * np.cos(w0), 1.0 - alpha]
     hp_filtered = biquad_filter(denoised, b_hp, a_hp)
     
-    # 3. Speech Presence EQ: +3.5 dB peaking filter at 3000 Hz, Q=1.2
-    f0 = 3000.0 / float(sr)
-    gain_db = 3.5
+    # 3. Aggressive Speech Presence EQ: +5.0 dB at 3200 Hz (cuts through ambient room noise)
+    f0 = 3200.0 / float(sr)
+    gain_db = 5.0
     A = 10.0 ** (gain_db / 40.0)
-    Q_eq = 1.2
+    Q_eq = 1.0
     w0_eq = 2.0 * np.pi * f0
     alpha_eq = np.sin(w0_eq) / (2.0 * Q_eq)
     b_eq = [1.0 + alpha_eq * A, -2.0 * np.cos(w0_eq), 1.0 - alpha_eq * A]
     a_eq = [1.0 + alpha_eq / A, -2.0 * np.cos(w0_eq), 1.0 - alpha_eq / A]
     peaked = biquad_filter(hp_filtered, b_eq, a_eq)
     
-    # 4. Soft-knee dynamic compressor / limiter
+    # 4. Multi-Stage Vocal Compression / Maximizer
+    # Raises quieter consonants so every word is loud and clear across the room
     abs_audio = np.abs(peaked)
-    threshold = 0.35
-    ratio = 2.5
+    threshold = 0.25
+    ratio = 3.0
     compressed = np.where(abs_audio > threshold, 
                           np.sign(peaked) * (threshold + (abs_audio - threshold) / ratio), 
-                          peaked)
+                          peaked * 1.3)
             
-    # 5. Trim dead silence from start/end (preserves speech + natural 20ms lead / 35ms trail)
+    # 5. Trim leading/trailing silence safely
     abs_comp = np.abs(compressed)
-    active_indices = np.where(abs_comp > 0.012)[0]
+    active_indices = np.where(abs_comp > 0.02)[0]
     if len(active_indices) > 0:
         start_idx = max(0, active_indices[0] - int(0.020 * sr))
-        end_idx = min(len(compressed), active_indices[-1] + int(0.035 * sr))
+        end_idx = min(len(compressed), active_indices[-1] + int(0.040 * sr))
         compressed = compressed[start_idx:end_idx]
 
-    # Ensure even sample count for 16-bit word alignment
     if len(compressed) % 2 != 0:
         compressed = compressed[:-1]
             
-    # 6. Smooth Fade-in (10ms) and Fade-out (15ms) to prevent DAC clicking
-    fade_in_len = int(sr * 0.010)
-    fade_out_len = int(sr * 0.015)
-    fade_in = np.sin(np.linspace(0, np.pi / 2, fade_in_len)) ** 2
-    fade_out = np.cos(np.linspace(0, np.pi / 2, fade_out_len)) ** 2
+    # 6. Smooth anti-click endpoints (5ms)
+    fade_len = int(sr * 0.005)
+    fade_in = np.sin(np.linspace(0, np.pi / 2, fade_len)) ** 2
+    fade_out = np.cos(np.linspace(0, np.pi / 2, fade_len)) ** 2
+    compressed[:fade_len] *= fade_in
+    compressed[-fade_len:] *= fade_out
     
-    compressed[:fade_in_len] *= fade_in
-    compressed[-fade_out_len:] *= fade_out
-    
-    # 7. Peak Normalization to -0.5 dBFS (0.944)
+    # 7. 100% Full-Scale Normalization (0.999 peak) for maximum physical 3W drive
     peak = np.max(np.abs(compressed))
     if peak > 0:
-        compressed = compressed * (0.944 / peak)
+        compressed = (compressed / peak) * 0.999
         
     return compressed
 
 def process_all():
-    print("=== CHARGELINK AUDIO ENHANCEMENT & CONVERSION ===")
+    print("=== CHARGELINK MAXIMUM-LOUDNESS AUDIO ENHANCEMENT ===")
     os.makedirs(AUDIO_OUT_DIR, exist_ok=True)
     os.makedirs(FIRMWARE_OUT_DIR, exist_ok=True)
     
@@ -169,14 +165,14 @@ def process_all():
         decoded = miniaudio.decode_file(src_path, nchannels=1, sample_rate=TARGET_SAMPLE_RATE)
         raw_pcm = np.frombuffer(decoded.samples, dtype=np.int16).astype(np.float32) / 32768.0
         
-        # Apply DSP enhancement
-        enhanced = enhance_audio(raw_pcm, sr=TARGET_SAMPLE_RATE)
+        # Apply maximum loudness room-filling DSP
+        enhanced = enhance_audio_for_loudspeaker(raw_pcm, sr=TARGET_SAMPLE_RATE)
         
-        # Convert back to 16-bit PCM
+        # Convert to 16-bit PCM
         pcm16 = np.clip(enhanced * 32767.0, -32768.0, 32767.0).astype(np.int16)
         pcm16_bytes = pcm16.tobytes()
         
-        # Write enhanced WAV file to res/audio
+        # Write enhanced WAV file
         wav_path = os.path.join(AUDIO_OUT_DIR, item["wav_name"])
         with wave.open(wav_path, "wb") as wav_file:
             wav_file.setnchannels(1)
@@ -208,9 +204,9 @@ def process_all():
             f.write(f"const unsigned int {array_name}_len = {len(pcm16_bytes)};\n\n")
             f.write(f"#endif\n")
             
-        print(f"  [HEADER] Generated: {item['h_name']} ({len(pcm16_bytes)} bytes, len_var={len(pcm16_bytes)})")
+        print(f"  [HEADER] Generated: {item['h_name']} ({len(pcm16_bytes)} bytes)")
 
-    print("\nAll files successfully enhanced and firmware headers replaced!")
+    print("\nAll audio files maximized and firmware headers generated!")
 
 if __name__ == "__main__":
     process_all()

@@ -457,49 +457,10 @@ unsigned long lastSerialMillis = 0;
 
 
 // ============================================================
-// AUDIO FILTER STATE
+// AUDIO STATE
 // ============================================================
-
-float dcFilter = 0.0f;
-
-float bassFilter = 0.0f;
-
-float trebleFilter = 0.0f;
-
-float previousOutput = 0.0f;
-
-float gateEnvelope = 0.0f;
 
 bool audioPlaying = false;
-
-
-// ============================================================
-// AUDIO EQ & NOISE GATE CONSTANTS
-// ============================================================
-
-const float DC_ALPHA =
-  0.995f;
-
-const float BASS_ALPHA =
-  0.045f;
-
-const float TREBLE_ALPHA =
-  0.35f;
-
-const float BASS_GAIN =
-  1.05f;
-
-const float VOICE_GAIN =
-  1.15f;
-
-const float CLARITY_GAIN =
-  1.15f;
-
-const float OUTPUT_GAIN =
-  0.92f;
-
-const float NOISE_GATE_THRESHOLD =
-  0.020f;
 
 
 
@@ -517,154 +478,13 @@ unsigned long getTimestamp() {
 
 
 // ============================================================
-// AUDIO SOFT LIMITER
-// ============================================================
-
-float softLimit(float x) {
-
-  if (x > 1.0f) {
-
-    x =
-      1.0f -
-      (
-        1.0f /
-        (x + 1.0f)
-      );
-  }
-
-
-  if (x < -1.0f) {
-
-    x =
-      -1.0f +
-      (
-        1.0f /
-        (-x + 1.0f)
-      );
-  }
-
-
-  return x;
-}
-
-
-// ============================================================
-// AUDIO PROCESSING
-// ============================================================
-
-float processAudioSample(float input) {
-
-  dcFilter =
-    DC_ALPHA * dcFilter +
-    (1.0f - DC_ALPHA) * input;
-
-
-  float clean =
-    input -
-    dcFilter;
-
-
-  // Envelope tracker for dynamic noise gate
-  float sampleAbs =
-    fabsf(clean);
-
-  if (sampleAbs > gateEnvelope) {
-
-    gateEnvelope =
-      sampleAbs;
-
-  } else {
-
-    gateEnvelope *=
-      0.998f;
-  }
-
-
-  bassFilter =
-    bassFilter +
-    BASS_ALPHA *
-    (
-      clean -
-      bassFilter
-    );
-
-
-  float bass =
-    bassFilter;
-
-
-  trebleFilter =
-    trebleFilter +
-    TREBLE_ALPHA *
-    (
-      clean -
-      trebleFilter
-    );
-
-
-  float treble =
-    clean -
-    trebleFilter;
-
-
-  float voice =
-    clean -
-    bass -
-    treble;
-
-
-  float processed =
-      (bass   * BASS_GAIN)
-    + (voice  * VOICE_GAIN)
-    + (treble * CLARITY_GAIN);
-
-
-  processed *=
-    OUTPUT_GAIN;
-
-
-  // Dynamic Noise Gate: smoothly attenuate silence & background hiss
-  if (gateEnvelope < NOISE_GATE_THRESHOLD) {
-
-    float gateFactor =
-      gateEnvelope /
-      NOISE_GATE_THRESHOLD;
-
-    processed *=
-      (gateFactor * gateFactor);
-  }
-
-
-  // Anti-aliasing smoothing filter
-  processed =
-      previousOutput * 0.10f
-    + processed * 0.90f;
-
-
-  previousOutput =
-    processed;
-
-
-  processed =
-    softLimit(
-      processed
-    );
-
-
-  return processed;
-}
-
-
-// ============================================================
-// PLAY PCM AUDIO
+// PLAY PCM AUDIO (MAXIMUM 3W LOUDNESS)
 // ============================================================
 //
-// 16-bit signed PCM
-// Little endian
-// 16 kHz
-// Mono
-//
-// Enhanced: Anti-Pop Bias Ramp + Noise Gate + TPDF Dither + Idle Sleep
+// 16-bit signed PCM, 16 kHz, Mono
+// Direct full-scale DAC drive (0 - 255 swing, 3.3V pk-pk)
+// Smooth 15ms anti-pop ramp-up / ramp-down
+// Idle 0V output, active driver handle (no tri-state failure)
 //
 
 void playAudio(
@@ -677,211 +497,95 @@ void playAudio(
     audio == nullptr ||
     length < 2
   ) {
-
     return;
   }
 
-
-  audioPlaying =
-    true;
-
+  audioPlaying = true;
 
   Serial.println();
-
   Serial.println(
     "======================================"
   );
-
   Serial.println(
-    "PLAYING VOICE (NOISE-FREE ENHANCED)"
+    "PLAYING VOICE (MAXIMUM 3W LOUDNESS)"
   );
-
   Serial.println(
     "GPIO26 / DAC2"
   );
-
   Serial.println(
     "16-bit PCM / 16 kHz / MONO"
   );
-
   Serial.println(
     "======================================"
   );
 
-
-  dcFilter = 0.0f;
-
-  bassFilter = 0.0f;
-
-  trebleFilter = 0.0f;
-
-  previousOutput = 0.0f;
-
-  gateEnvelope = 0.0f;
-
-
-  // Enable DAC pin output
   pinMode(
     AUDIO_PIN,
     OUTPUT
   );
 
-
-  // Smooth Anti-Pop Ramp-Up: 0V -> 1.65V DC operating bias
+  // Smooth Anti-Pop Ramp-Up: 0V -> 1.65V DC operating bias (128)
   for (int ramp = 0; ramp <= 128; ramp++) {
-
     dacWrite(
       AUDIO_PIN,
       (uint8_t)ramp
     );
-
     delayMicroseconds(120);
   }
 
+  unsigned int samples = length / 2;
+  unsigned long nextSample = micros();
+  bool extraMicrosecond = false;
 
-  unsigned int samples =
-    length / 2;
+  for (unsigned int i = 0; i < samples; i++) {
+    uint16_t low = audio[i * 2];
+    uint16_t high = audio[i * 2 + 1];
+    int16_t rawSample = (int16_t)((high << 8) | low);
 
-
-  unsigned long nextSample =
-    micros();
-
-
-  bool extraMicrosecond =
-    false;
-
-
-  // High-frequency TPDF dither LFSR state
-  uint16_t lfsr =
-    0xACE1u;
-
-
-  for (
-    unsigned int i = 0;
-    i < samples;
-    i++
-  ) {
-
-    uint16_t low =
-      audio[
-        i * 2
-      ];
-
-
-    uint16_t high =
-      audio[
-        i * 2 + 1
-      ];
-
-
-    int16_t rawSample =
-      (int16_t)(
-        (high << 8) |
-        low
-      );
-
-
-    float input =
-      (float)rawSample /
-      32768.0f;
-
-
-    float processed =
-      processAudioSample(
-        input
-      );
-
-
-    // 1-bit TPDF dither to eliminate 8-bit DAC quantization distortion
-    lfsr =
-      (lfsr >> 1) ^
-      (-(lfsr & 1u) & 0xB400u);
-
-    float dither =
-      ((float)(lfsr & 0x0F) - 7.5f) /
-      1024.0f;
-
-
-    int dacValue =
-      (int)(
-        (processed + dither) * 127.0f +
-        128.0f
-      );
-
-
-    if (dacValue < 0) {
-
-      dacValue = 0;
-    }
-
-
-    if (dacValue > 255) {
-
-      dacValue = 255;
-    }
-
+    // Full-scale 3.3V DAC mapping: [-32768..32767] -> [0..255]
+    int dacValue = (rawSample >> 8) + 128;
+    if (dacValue < 0) dacValue = 0;
+    if (dacValue > 255) dacValue = 255;
 
     dacWrite(
       AUDIO_PIN,
       (uint8_t)dacValue
     );
 
-
+    // 16000 Hz = 62.5 microseconds per sample
     nextSample += 62;
-
-    extraMicrosecond =
-      !extraMicrosecond;
-
-
+    extraMicrosecond = !extraMicrosecond;
     if (extraMicrosecond) {
-
       nextSample += 1;
     }
 
-
-    while (
-      (long)(
-        micros() -
-        nextSample
-      ) < 0
-    ) {
-
+    while ((long)(micros() - nextSample) < 0) {
       yield();
     }
   }
 
-
-  // Smooth Anti-Pop Ramp-Down: 1.65V DC bias -> 0V
+  // Smooth Anti-Pop Ramp-Down: 1.65V DC bias (128) -> 0V
   for (int ramp = 128; ramp >= 0; ramp--) {
-
     dacWrite(
       AUDIO_PIN,
       (uint8_t)ramp
     );
-
     delayMicroseconds(120);
   }
 
-
-  // Disable DAC and tri-state pin to completely eliminate idle hiss & coil power
-  dacDisable(
-    AUDIO_PIN
-  );
-
-  pinMode(
+  // Hold 0V when idle: zero DC current through speaker coil, driver remains active
+  dacWrite(
     AUDIO_PIN,
-    INPUT
+    0
   );
 
-
-  audioPlaying =
-    false;
-
+  audioPlaying = false;
 
   Serial.println(
-    "Voice finished (DAC sleeping in silent mode)."
+    "Voice finished (DAC idle at 0V, driver active)."
   );
 }
+
 
 
 // ============================================================
@@ -4286,27 +3990,24 @@ void setup() {
   Serial.println();
 
   Serial.println(
-    "Initializing audio DAC (silent standby)..."
+    "Initializing audio DAC (0V standby)..."
   );
 
 
   pinMode(
     AUDIO_PIN,
-    INPUT
+    OUTPUT
   );
 
 
-  dacDisable(
-    AUDIO_PIN
+  dacWrite(
+    AUDIO_PIN,
+    0
   );
 
 
   Serial.println(
-    "DAC: Standby OK (noise-free idle)"
-  );
-
-  Serial.println(
-    "GPIO26 / DAC2"
+    "DAC: Standby OK (GPIO26 / DAC2 ready)"
   );
 
 
@@ -4604,7 +4305,20 @@ void setup() {
   Serial.println(
     "======================================"
   );
+
+
+  // Startup Voice Greeting: Test 3W speaker immediately on boot/flash
+  Serial.println();
+  Serial.println(
+    "Playing startup voice greeting..."
+  );
+
+  playAudio(
+    charging_started,
+    charging_started_len
+  );
 }
+
 
 
 // ============================================================
