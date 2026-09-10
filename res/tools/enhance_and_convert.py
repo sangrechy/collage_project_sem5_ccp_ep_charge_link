@@ -33,6 +33,27 @@ MAPPING = [
         "h_name": "power_limit.h",
         "array_name": "power_limit",
         "guard": "POWER_LIMIT_H"
+    },
+    {
+        "pattern": "*rged*.mp3",
+        "wav_name": "FULL_CHARGE.wav",
+        "h_name": "full_charge.h",
+        "array_name": "full_charge",
+        "guard": "FULL_CHARGE_H"
+    },
+    {
+        "pattern": "*cted*.mp3",
+        "wav_name": "NO_DEVICE.wav",
+        "h_name": "no_device.h",
+        "array_name": "no_device",
+        "guard": "NO_DEVICE_H"
+    },
+    {
+        "pattern": "*gain*.mp3",
+        "wav_name": "ERROR.wav",
+        "h_name": "charging_error.h",
+        "array_name": "charging_error",
+        "guard": "CHARGING_ERROR_H"
     }
 ]
 

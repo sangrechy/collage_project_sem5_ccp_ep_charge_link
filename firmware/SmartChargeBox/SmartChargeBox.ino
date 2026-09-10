@@ -150,6 +150,9 @@
 #include "charging_started.h"
 #include "charging_stopped.h"
 #include "power_limit.h"
+#include "full_charge.h"
+#include "no_device.h"
+#include "charging_error.h"
 
 
 // ============================================================
@@ -875,7 +878,8 @@ void startChargingSession(
 // ============================================================
 
 void stopChargingSession(
-  bool playVoice
+  bool playVoice,
+  const char *reason = nullptr
 ) {
 
   if (!sessionActive) {
@@ -901,6 +905,15 @@ void stopChargingSession(
     "CHARGING SESSION STOPPED"
   );
 
+  if (reason != nullptr) {
+    Serial.print(
+      "REASON: "
+    );
+    Serial.println(
+      reason
+    );
+  }
+
   Serial.print(
     "SESSION ID: "
   );
@@ -916,10 +929,53 @@ void stopChargingSession(
 
   if (playVoice) {
 
-    playAudio(
-      charging_stopped,
-      charging_stopped_len
-    );
+    if (
+      reason != nullptr &&
+      (strcmp(reason, "full_charge") == 0 || strcmp(reason, "battery_full") == 0)
+    ) {
+
+      playAudio(
+        full_charge,
+        full_charge_len
+      );
+
+    } else if (
+      reason != nullptr &&
+      strcmp(reason, "no_device") == 0
+    ) {
+
+      playAudio(
+        no_device,
+        no_device_len
+      );
+
+    } else if (
+      reason != nullptr &&
+      (strcmp(reason, "error") == 0 || strcmp(reason, "charging_error") == 0)
+    ) {
+
+      playAudio(
+        charging_error,
+        charging_error_len
+      );
+
+    } else if (
+      reason != nullptr &&
+      (strcmp(reason, "power_limit") == 0 || strcmp(reason, "limit") == 0)
+    ) {
+
+      playAudio(
+        power_limit,
+        power_limit_len
+      );
+
+    } else {
+
+      playAudio(
+        charging_stopped,
+        charging_stopped_len
+      );
+    }
   }
 }
 
@@ -1089,6 +1145,31 @@ void updateChargingStateFromMeasurement() {
 
   else {
 
+    // Overcurrent protection (hardware short-circuit safety)
+    if (currentA > 3.0f) {
+
+      Serial.println(
+        "SAFETY FAULT: Overcurrent detected (>3.0A)! Disabling path."
+      );
+
+      relayChargingOff();
+
+      charging =
+        false;
+
+      stopChargingSession(
+        false
+      );
+
+      playAudio(
+        charging_error,
+        charging_error_len
+      );
+
+      return;
+    }
+
+
     if (
       currentA <=
       CHARGING_STOP_THRESHOLD_A
@@ -1098,9 +1179,34 @@ void updateChargingStateFromMeasurement() {
         false;
 
 
-      stopChargingSession(
-        true
-      );
+      // If the session transferred energy or ran for a substantial period,
+      // the phone battery has reached full charge.
+      // Otherwise, the cable was unplugged early (circuit open / no device).
+      if (
+        sessionEnergyWh >= 0.10f ||
+        sessionSampleCount >= 60
+      ) {
+
+        Serial.println(
+          "STATUS: Battery fully charged (current dropped after session)"
+        );
+
+        stopChargingSession(
+          true,
+          "full_charge"
+        );
+
+      } else {
+
+        Serial.println(
+          "STATUS: Circuit open / device disconnected during session"
+        );
+
+        stopChargingSession(
+          true,
+          "no_device"
+        );
+      }
     }
   }
 }
@@ -1830,6 +1936,9 @@ void commandStartCharging(
   relayChargingOn();
 
 
+  // Allow USB-PD / device connection to begin drawing current
+  delay(150);
+
   // Take a fresh reading immediately so telemetry pushed right
   // after this response is as up to date as possible.
   readPower();
@@ -1837,6 +1946,22 @@ void commandStartCharging(
   updateChargingStateFromMeasurement();
 
   updateLiveCache();
+
+  // If path is enabled, but current is below threshold: circuit open / no device connected!
+  if (
+    ina219Available &&
+    currentA < CHARGING_STOP_THRESHOLD_A
+  ) {
+
+    Serial.println(
+      "CIRCUIT OPEN: No device connected to charging port"
+    );
+
+    playAudio(
+      no_device,
+      no_device_len
+    );
+  }
 
 
   String data;
@@ -1908,12 +2033,22 @@ void commandStartCharging(
 //
 
 void commandStopCharging(
-  int id
+  int id,
+  const String &reason = ""
 ) {
 
   Serial.println(
     "COMMAND: stop_charging"
   );
+
+  if (reason.length() > 0) {
+    Serial.print(
+      "  reason: "
+    );
+    Serial.println(
+      reason
+    );
+  }
 
 
   relayChargingOff();
@@ -1922,8 +2057,53 @@ void commandStopCharging(
   if (sessionActive) {
 
     stopChargingSession(
-      true
+      true,
+      reason.length() > 0
+        ? reason.c_str()
+        : nullptr
     );
+
+  } else if (reason.length() > 0) {
+
+    if (
+      reason == "full_charge" ||
+      reason == "battery_full"
+    ) {
+
+      playAudio(
+        full_charge,
+        full_charge_len
+      );
+
+    } else if (
+      reason == "no_device"
+    ) {
+
+      playAudio(
+        no_device,
+        no_device_len
+      );
+
+    } else if (
+      reason == "error" ||
+      reason == "charging_error"
+    ) {
+
+      playAudio(
+        charging_error,
+        charging_error_len
+      );
+
+    } else if (
+      reason == "power_limit" ||
+      reason == "limit"
+    ) {
+
+      playAudio(
+        power_limit,
+        power_limit_len
+      );
+    }
   }
 
 
@@ -2700,6 +2880,64 @@ String extractCommand(
 
 
 // ============================================================
+// JSON STRING EXTRACTOR
+// ============================================================
+
+String extractString(
+  const String &json,
+  const String &fieldName
+) {
+
+  String key =
+    "\"" + fieldName + "\"";
+
+  int position =
+    json.indexOf(
+      key
+    );
+
+  if (position < 0) {
+    return "";
+  }
+
+  int colon =
+    json.indexOf(
+      ':',
+      position
+    );
+
+  if (colon < 0) {
+    return "";
+  }
+
+  int firstQuote =
+    json.indexOf(
+      '"',
+      colon + 1
+    );
+
+  if (firstQuote < 0) {
+    return "";
+  }
+
+  int secondQuote =
+    json.indexOf(
+      '"',
+      firstQuote + 1
+    );
+
+  if (secondQuote < 0) {
+    return "";
+  }
+
+  return json.substring(
+    firstQuote + 1,
+    secondQuote
+  );
+}
+
+
+// ============================================================
 // HISTORY CHUNK
 // ============================================================
 
@@ -3169,8 +3407,15 @@ void handleCommand(
     "stop_charging"
   ) {
 
+    String reason =
+      extractString(
+        json,
+        "reason"
+      );
+
     commandStopCharging(
-      id
+      id,
+      reason
     );
 
 
@@ -3321,6 +3566,85 @@ void handleCommand(
       limit
     );
 
+
+  }
+
+  else if (
+    command ==
+    "play_voice"
+  ) {
+
+    String voice =
+      extractString(
+        json,
+        "voice"
+      );
+
+    if (
+      voice == "full_charge" ||
+      voice == "battery_full" ||
+      voice == "battery_charged"
+    ) {
+
+      playAudio(
+        full_charge,
+        full_charge_len
+      );
+
+    } else if (
+      voice == "no_device"
+    ) {
+
+      playAudio(
+        no_device,
+        no_device_len
+      );
+
+    } else if (
+      voice == "error" ||
+      voice == "charging_error"
+    ) {
+
+      playAudio(
+        charging_error,
+        charging_error_len
+      );
+
+    } else if (
+      voice == "started" ||
+      voice == "charging_started"
+    ) {
+
+      playAudio(
+        charging_started,
+        charging_started_len
+      );
+
+    } else if (
+      voice == "stopped" ||
+      voice == "charging_stopped"
+    ) {
+
+      playAudio(
+        charging_stopped,
+        charging_stopped_len
+      );
+
+    } else if (
+      voice == "power_limit" ||
+      voice == "limit"
+    ) {
+
+      playAudio(
+        power_limit,
+        power_limit_len
+      );
+    }
+
+    sendResponse(
+      id,
+      "{\"command_accepted\":true}"
+    );
 
   }
 
