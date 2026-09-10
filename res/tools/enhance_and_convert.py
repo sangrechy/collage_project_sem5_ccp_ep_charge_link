@@ -1,4 +1,4 @@
-﻿import os
+import os
 import glob
 import wave
 import numpy as np
@@ -123,7 +123,19 @@ def enhance_audio(data, sr=16000):
                           np.sign(peaked) * (threshold + (abs_audio - threshold) / ratio), 
                           peaked)
             
-    # 5. Smooth Fade-in (10ms) and Fade-out (15ms) to prevent DAC clicking
+    # 5. Trim dead silence from start/end (preserves speech + natural 20ms lead / 35ms trail)
+    abs_comp = np.abs(compressed)
+    active_indices = np.where(abs_comp > 0.012)[0]
+    if len(active_indices) > 0:
+        start_idx = max(0, active_indices[0] - int(0.020 * sr))
+        end_idx = min(len(compressed), active_indices[-1] + int(0.035 * sr))
+        compressed = compressed[start_idx:end_idx]
+
+    # Ensure even sample count for 16-bit word alignment
+    if len(compressed) % 2 != 0:
+        compressed = compressed[:-1]
+            
+    # 6. Smooth Fade-in (10ms) and Fade-out (15ms) to prevent DAC clicking
     fade_in_len = int(sr * 0.010)
     fade_out_len = int(sr * 0.015)
     fade_in = np.sin(np.linspace(0, np.pi / 2, fade_in_len)) ** 2
@@ -132,7 +144,7 @@ def enhance_audio(data, sr=16000):
     compressed[:fade_in_len] *= fade_in
     compressed[-fade_out_len:] *= fade_out
     
-    # 6. Peak Normalization to -0.5 dBFS (0.944)
+    # 7. Peak Normalization to -0.5 dBFS (0.944)
     peak = np.max(np.abs(compressed))
     if peak > 0:
         compressed = compressed * (0.944 / peak)
