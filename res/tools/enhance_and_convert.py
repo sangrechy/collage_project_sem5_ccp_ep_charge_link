@@ -1,7 +1,8 @@
-﻿import os
+import os
 import glob
 import wave
 import numpy as np
+import scipy.signal as signal
 import miniaudio
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -35,123 +36,89 @@ MAPPING = [
     }
 ]
 
-def biquad_filter(data, b, a):
-    b0, b1, b2 = b[0] / a[0], b[1] / a[0], b[2] / a[0]
-    a1, a2 = a[1] / a[0], a[2] / a[0]
-    y = np.zeros_like(data)
-    x1, x2, y1, y2 = 0.0, 0.0, 0.0, 0.0
-    for n in range(len(data)):
-        xn = data[n]
-        yn = b0 * xn + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
-        y[n] = yn
-        x2, x1 = x1, xn
-        y2, y1 = y1, yn
-    return y
+def enhance_audio_clean(pcm, sr=16000):
+    """
+    Professional Speech DSP Equalization & Cleaning for 3W Loudspeaker & ESP32 DAC:
+    1. 160 Hz Butterworth HP: Removes speaker cone bottoming & DC offset.
+    2. 5000 Hz Butterworth LP: Cuts off 8-bit quantization hiss & ultrasonic hash.
+    3. +2.0 dB Peaking EQ at 2200 Hz: Optimizes vocal formant intelligibility for small speakers.
+    4. Smooth Envelope Compressor: Broadcast vocal presence without waveform distortion.
+    5. Clean silence trimming & 10ms raised-cosine anti-click fade in/out.
+    6. Bounded 0.80 peak (-1.9 dBFS): Prevents amplifier input clipping and supply sag.
+    """
+    # 1. High-Pass Filter (160 Hz, 2nd-order Butterworth)
+    sos_hp = signal.butter(2, 160.0, btype='highpass', fs=sr, output='sos')
+    filtered = signal.sosfilt(sos_hp, pcm)
 
-def spectral_subtraction(audio, sr=16000, frame_len=512, hop_len=128):
-    window = np.hanning(frame_len)
-    num_frames = (len(audio) - frame_len) // hop_len + 1
-    frames = np.lib.stride_tricks.as_strided(
-        audio, shape=(num_frames, frame_len),
-        strides=(audio.strides[0] * hop_len, audio.strides[0])
-    )
-    windowed = frames * window
-    spectra = np.fft.rfft(windowed, axis=1)
-    mag = np.abs(spectra)
-    phase = np.angle(spectra)
+    # 2. Low-Pass Filter (5000 Hz, 3rd-order Butterworth)
+    # Human speech bandwidth is <4.5 kHz. Cutting above 5 kHz eliminates quantization hiss.
+    sos_lp = signal.butter(3, 5000.0, btype='lowpass', fs=sr, output='sos')
+    filtered = signal.sosfilt(sos_lp, filtered)
 
-    energies = np.sum(mag**2, axis=1)
-    thresh = np.percentile(energies, 10)
-    noise_frames = mag[energies <= thresh]
-    if len(noise_frames) > 0:
-        noise_profile = np.mean(noise_frames, axis=0, keepdims=True)
-    else:
-        noise_profile = np.min(mag, axis=0, keepdims=True)
+    # 3. Speech Presence EQ (+2.0 dB at 2200 Hz, Q=1.0)
+    w0 = 2.0 * np.pi * 2200.0 / sr
+    alpha = np.sin(w0) / (2.0 * 1.0)
+    A = 10.0 ** (2.0 / 40.0) # +2 dB
+    b_eq = [1.0 + alpha * A, -2.0 * np.cos(w0), 1.0 - alpha * A]
+    a_eq = [1.0 + alpha / A, -2.0 * np.cos(w0), 1.0 - alpha / A]
+    equalized = signal.lfilter(b_eq, a_eq, filtered)
 
-    clean_mag = np.maximum(mag - 1.2 * noise_profile, 0.08 * mag)
-    clean_spectra = clean_mag * np.exp(1j * phase)
+    # 4. Smooth Envelope Compressor (5ms attack, 60ms release)
+    # Operates on signal envelope - zero harmonic distortion or wave chopping!
+    envelope = np.zeros_like(equalized)
+    env = 0.0
+    att_coef = np.exp(-1.0 / (0.005 * sr))
+    rel_coef = np.exp(-1.0 / (0.060 * sr))
+    for i in range(len(equalized)):
+        s = abs(equalized[i])
+        if s > env:
+            env = att_coef * env + (1.0 - att_coef) * s
+        else:
+            env = rel_coef * env + (1.0 - rel_coef) * s
+        envelope[i] = env
 
-    clean_frames = np.fft.irfft(clean_spectra, axis=1) * window
-    out_len = (num_frames - 1) * hop_len + frame_len
-    out_audio = np.zeros(out_len, dtype=np.float32)
-    norm_window = np.zeros(out_len, dtype=np.float32)
-    for i in range(num_frames):
-        start = i * hop_len
-        out_audio[start:start + frame_len] += clean_frames[i]
-        norm_window[start:start + frame_len] += window**2
+    thresh = 0.16
+    gain = np.ones_like(equalized)
+    over = envelope > thresh
+    gain[over] = (thresh / envelope[over]) ** (1.0 - 1.0 / 2.5) # 2.5:1 ratio
+    compressed = equalized * gain * 1.25 # 1.25x makeup gain
 
-    norm_window = np.maximum(norm_window, 1e-6)
-    out_audio /= norm_window
-
-    if len(out_audio) < len(audio):
-        out_audio = np.pad(out_audio, (0, len(audio) - len(out_audio)))
-    else:
-        out_audio = out_audio[:len(audio)]
-    return out_audio
-
-def enhance_audio_for_loudspeaker(data, sr=16000):
-    # 1. Spectral Subtraction Denoising
-    denoised = spectral_subtraction(data, sr=sr)
-    
-    # 2. High-pass filter at 120 Hz (cuts off useless sub-frequencies that cause 3W speaker distortion)
-    fc = 120.0 / float(sr)
-    w0 = 2.0 * np.pi * fc
-    Q = 0.7071
-    alpha = np.sin(w0) / (2.0 * Q)
-    b_hp = [(1.0 + np.cos(w0)) / 2.0, -(1.0 + np.cos(w0)), (1.0 + np.cos(w0)) / 2.0]
-    a_hp = [1.0 + alpha, -2.0 * np.cos(w0), 1.0 - alpha]
-    hp_filtered = biquad_filter(denoised, b_hp, a_hp)
-    
-    # 3. Aggressive Speech Presence EQ: +5.0 dB at 3200 Hz (cuts through ambient room noise)
-    f0 = 3200.0 / float(sr)
-    gain_db = 5.0
-    A = 10.0 ** (gain_db / 40.0)
-    Q_eq = 1.0
-    w0_eq = 2.0 * np.pi * f0
-    alpha_eq = np.sin(w0_eq) / (2.0 * Q_eq)
-    b_eq = [1.0 + alpha_eq * A, -2.0 * np.cos(w0_eq), 1.0 - alpha_eq * A]
-    a_eq = [1.0 + alpha_eq / A, -2.0 * np.cos(w0_eq), 1.0 - alpha_eq / A]
-    peaked = biquad_filter(hp_filtered, b_eq, a_eq)
-    
-    # 4. Multi-Stage Vocal Compression / Maximizer
-    # Raises quieter consonants so every word is loud and clear across the room
-    abs_audio = np.abs(peaked)
-    threshold = 0.25
-    ratio = 3.0
-    compressed = np.where(abs_audio > threshold, 
-                          np.sign(peaked) * (threshold + (abs_audio - threshold) / ratio), 
-                          peaked * 1.3)
-            
     # 5. Trim leading/trailing silence safely
-    abs_comp = np.abs(compressed)
-    active_indices = np.where(abs_comp > 0.02)[0]
-    if len(active_indices) > 0:
-        start_idx = max(0, active_indices[0] - int(0.020 * sr))
-        end_idx = min(len(compressed), active_indices[-1] + int(0.040 * sr))
-        compressed = compressed[start_idx:end_idx]
+    active = np.where(np.abs(compressed) > 0.01)[0]
+    if len(active) > 0:
+        start_idx = max(0, active[0] - int(0.025 * sr))
+        end_idx = min(len(compressed), active[-1] + int(0.035 * sr))
+        trimmed = compressed[start_idx:end_idx]
+    else:
+        trimmed = compressed
 
-    if len(compressed) % 2 != 0:
-        compressed = compressed[:-1]
-            
-    # 6. Smooth anti-click endpoints (5ms)
-    fade_len = int(sr * 0.005)
-    fade_in = np.sin(np.linspace(0, np.pi / 2, fade_len)) ** 2
-    fade_out = np.cos(np.linspace(0, np.pi / 2, fade_len)) ** 2
-    compressed[:fade_len] *= fade_in
-    compressed[-fade_len:] *= fade_out
-    
-    # 7. 100% Full-Scale Normalization (0.999 peak) for maximum physical 3W drive
-    peak = np.max(np.abs(compressed))
-    if peak > 0:
-        compressed = (compressed / peak) * 0.999
-        
-    return compressed
+    # Ensure even sample count for 16-bit word alignment
+    if len(trimmed) % 2 != 0:
+        trimmed = trimmed[:-1]
+
+    # 6. Smooth 10ms raised-cosine fade in / fade out (zero click/thump)
+    fade_len = int(0.010 * sr)
+    if len(trimmed) > 2 * fade_len:
+        fade_in = 0.5 * (1.0 - np.cos(np.linspace(0, np.pi, fade_len)))
+        fade_out = 0.5 * (1.0 + np.cos(np.linspace(0, np.pi, fade_len)))
+        trimmed[:fade_len] *= fade_in
+        trimmed[-fade_len:] *= fade_out
+
+    # 7. Safe peak normalization to 0.80 (-1.9 dBFS)
+    # Leaves 20% voltage margin so 3W amplifier (PAM8403 / 8002 / LM386) never clips
+    pk = np.max(np.abs(trimmed))
+    if pk > 0:
+        final = (trimmed / pk) * 0.80
+    else:
+        final = trimmed
+
+    return final
 
 def process_all():
-    print("=== CHARGELINK MAXIMUM-LOUDNESS AUDIO ENHANCEMENT ===")
+    print("=== CHARGELINK CLEAN SPEECH EQUALIZATION & CONVERSION ===")
     os.makedirs(AUDIO_OUT_DIR, exist_ok=True)
     os.makedirs(FIRMWARE_OUT_DIR, exist_ok=True)
-    
+
     for item in MAPPING:
         pattern = os.path.join(RAW_DIR, item["pattern"])
         matches = glob.glob(pattern)
@@ -160,19 +127,19 @@ def process_all():
         src_path = matches[0]
         base_name = os.path.basename(src_path)
         print(f"\nProcessing: {base_name} -> {item['array_name']}")
-        
-        # Decode and resample to 16kHz Mono
+
+        # Decode MP3 to 16kHz Mono float
         decoded = miniaudio.decode_file(src_path, nchannels=1, sample_rate=TARGET_SAMPLE_RATE)
         raw_pcm = np.frombuffer(decoded.samples, dtype=np.int16).astype(np.float32) / 32768.0
-        
-        # Apply maximum loudness room-filling DSP
-        enhanced = enhance_audio_for_loudspeaker(raw_pcm, sr=TARGET_SAMPLE_RATE)
-        
+
+        # Apply clean speech equalization & anti-clipping DSP
+        enhanced = enhance_audio_clean(raw_pcm, sr=TARGET_SAMPLE_RATE)
+
         # Convert to 16-bit PCM
         pcm16 = np.clip(enhanced * 32767.0, -32768.0, 32767.0).astype(np.int16)
         pcm16_bytes = pcm16.tobytes()
-        
-        # Write enhanced WAV file
+
+        # Write clean WAV file
         wav_path = os.path.join(AUDIO_OUT_DIR, item["wav_name"])
         with wave.open(wav_path, "wb") as wav_file:
             wav_file.setnchannels(1)
@@ -180,12 +147,12 @@ def process_all():
             wav_file.setframerate(TARGET_SAMPLE_RATE)
             wav_file.writeframes(pcm16_bytes)
         print(f"  [WAV] Saved: {item['wav_name']} ({len(pcm16_bytes)} bytes, {len(pcm16)/TARGET_SAMPLE_RATE:.2f}s)")
-        
+
         # Generate C PROGMEM header
         h_path = os.path.join(FIRMWARE_OUT_DIR, item["h_name"])
         array_name = item["array_name"]
         guard = item["guard"]
-        
+
         hex_lines = []
         for i in range(0, len(pcm16_bytes), 16):
             chunk = pcm16_bytes[i:i+16]
@@ -194,7 +161,7 @@ def process_all():
                 hex_str += ", "
             hex_lines.append(f"  {hex_str}")
         content = "\n".join(hex_lines)
-        
+
         with open(h_path, "w") as f:
             f.write(f"#ifndef {guard}\n")
             f.write(f"#define {guard}\n\n")
@@ -203,10 +170,11 @@ def process_all():
             f.write(f"\n}};\n\n")
             f.write(f"const unsigned int {array_name}_len = {len(pcm16_bytes)};\n\n")
             f.write(f"#endif\n")
-            
+
         print(f"  [HEADER] Generated: {item['h_name']} ({len(pcm16_bytes)} bytes)")
 
-    print("\nAll audio files maximized and firmware headers generated!")
+    print("\nAll audio files cleaned, equalized, and firmware headers generated successfully!")
 
 if __name__ == "__main__":
     process_all()
+
