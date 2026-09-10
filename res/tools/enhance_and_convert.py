@@ -80,10 +80,10 @@ def enhance_audio_clean(pcm, sr=16000):
     gain = np.ones_like(equalized)
     over = envelope > thresh
     gain[over] = (thresh / envelope[over]) ** (1.0 - 1.0 / 2.2) # Gentle 2.2:1 ratio
-    compressed = equalized * gain * 0.95 # Reduced sound volume
+    compressed = equalized * gain * 0.80 # Reduced sound volume
 
     # 5. Trim leading/trailing silence safely
-    active = np.where(np.abs(compressed) > 0.008)[0]
+    active = np.where(np.abs(compressed) > 0.005)[0]
     if len(active) > 0:
         start_idx = max(0, active[0] - int(0.025 * sr))
         end_idx = min(len(compressed), active[-1] + int(0.035 * sr))
@@ -103,11 +103,11 @@ def enhance_audio_clean(pcm, sr=16000):
         trimmed[:fade_len] *= fade_in
         trimmed[-fade_len:] *= fade_out
 
-    # 7. Reduced peak normalization to 0.50 (-6.0 dBFS)
-    # Reduces sound level to comfortable room listening with zero bass distortion
+    # 7. Reduced peak normalization to 0.32 (-10.0 dBFS)
+    # Reduces sound level to a soft, comfortable volume
     pk = np.max(np.abs(trimmed))
     if pk > 0:
-        final = (trimmed / pk) * 0.50
+        final = (trimmed / pk) * 0.32
     else:
         final = trimmed
 
