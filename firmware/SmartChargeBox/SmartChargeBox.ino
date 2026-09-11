@@ -153,6 +153,8 @@
 #include "full_charge.h"
 #include "no_device.h"
 #include "charging_error.h"
+#include "app_connected.h"
+#include "app_disconnected.h"
 
 
 // ============================================================
@@ -260,6 +262,8 @@ BLECharacteristic *historyCharacteristic = nullptr;
 // ============================================================
 
 volatile bool bleConnected = false;
+volatile bool playAppConnectedPending = false;
+volatile bool playAppDisconnectedPending = false;
 
 
 // ============================================================
@@ -564,12 +568,12 @@ void playAudio(
     // Midpoint interpolated sample (cuts quantization step in half)
     int16_t sMid = (int16_t)(((int32_t)s1 + (int32_t)s2) / 2);
 
-    // 8-bit DAC values
-    int dac1 = (s1 >> 8) + 128;
+    // 8-bit DAC values with proper half-LSB rounding
+    int dac1 = ((int32_t)s1 + 32768 + 128) >> 8;
     if (dac1 < 0) dac1 = 0;
     if (dac1 > 255) dac1 = 255;
 
-    int dac2 = (sMid >> 8) + 128;
+    int dac2 = ((int32_t)sMid + 32768 + 128) >> 8;
     if (dac2 < 0) dac2 = 0;
     if (dac2 > 255) dac2 = 255;
 
@@ -3639,6 +3643,26 @@ void handleCommand(
         power_limit,
         power_limit_len
       );
+
+    } else if (
+      voice == "app_connected" ||
+      voice == "connected"
+    ) {
+
+      playAudio(
+        app_connected,
+        app_connected_len
+      );
+
+    } else if (
+      voice == "app_disconnected" ||
+      voice == "disconnected"
+    ) {
+
+      playAudio(
+        app_disconnected,
+        app_disconnected_len
+      );
     }
 
     sendResponse(
@@ -3673,6 +3697,8 @@ class ServerCallbacks :
     bleConnected =
       true;
 
+    playAppConnectedPending =
+      true;
 
     Serial.println();
 
@@ -3689,6 +3715,8 @@ class ServerCallbacks :
     bleConnected =
       false;
 
+    playAppDisconnectedPending =
+      true;
 
     Serial.println();
 
@@ -4696,6 +4724,19 @@ void setup() {
 // ============================================================
 
 void loop() {
+
+  // Play connection / disconnection audio outside BLE callback context
+  if (playAppConnectedPending) {
+    playAppConnectedPending = false;
+    delay(150);
+    playAudio(app_connected, app_connected_len);
+  }
+
+  if (playAppDisconnectedPending) {
+    playAppDisconnectedPending = false;
+    delay(150);
+    playAudio(app_disconnected, app_disconnected_len);
+  }
 
   unsigned long now =
     millis();
