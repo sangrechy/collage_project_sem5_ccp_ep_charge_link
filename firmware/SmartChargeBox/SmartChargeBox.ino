@@ -155,6 +155,7 @@
 #include "charging_error.h"
 #include "app_connected.h"
 #include "app_disconnected.h"
+#include "system_activated.h"
 
 
 // ============================================================
@@ -3663,6 +3664,17 @@ void handleCommand(
         app_disconnected,
         app_disconnected_len
       );
+
+    } else if (
+      voice == "activated" ||
+      voice == "system_activated" ||
+      voice == "startup"
+    ) {
+
+      playAudio(
+        system_activated,
+        system_activated_len
+      );
     }
 
     sendResponse(
@@ -4705,15 +4717,15 @@ void setup() {
   );
 
 
-  // Startup Voice Greeting: Test 3W speaker immediately on boot/flash
+  // Startup Voice Greeting: Charge Link has been activated. I'll take care from here.
   Serial.println();
   Serial.println(
-    "Playing startup voice greeting..."
+    "Playing startup activation: Charge Link has been activated..."
   );
 
   playAudio(
-    charging_started,
-    charging_started_len
+    system_activated,
+    system_activated_len
   );
 }
 
